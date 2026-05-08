@@ -2,6 +2,8 @@ require('dotenv').config();
 
 const CATEGORY_ID = '1502055567760425122';
 const COMPTE_CREE_CATEGORY_ID = '1502120982591045805';
+const DASHBOARD_CHANNEL_NAME = '📊・dashboard';
+const DASHBOARD_UPDATE_INTERVAL_MS = 12 * 60 * 60 * 1000;
 
 const VA_ROLE_ID = '1502068514264055909';
 const COMPTE_CREE_ROLE_ID = '1502084425092169749';
@@ -11,7 +13,8 @@ const {
     Client,
     GatewayIntentBits,
     PermissionsBitField,
-    ChannelType
+    ChannelType,
+    EmbedBuilder
 } = require('discord.js');
 
 const client = new Client({
@@ -23,8 +26,158 @@ const client = new Client({
     ]
 });
 
-client.once('ready', () => {
+const dashboardMessages = new Map();
+
+async function getDashboardChannel(guild) {
+    await guild.channels.fetch();
+
+    const existingChannel = guild.channels.cache.find(channel =>
+        channel.type === ChannelType.GuildText &&
+        channel.name === DASHBOARD_CHANNEL_NAME
+    );
+
+    if (existingChannel) return existingChannel;
+
+    return guild.channels.create({
+        name: DASHBOARD_CHANNEL_NAME,
+        type: ChannelType.GuildText,
+        permissionOverwrites: [
+            {
+                id: guild.id,
+                allow: [
+                    PermissionsBitField.Flags.ViewChannel,
+                    PermissionsBitField.Flags.ReadMessageHistory
+                ],
+                deny: [PermissionsBitField.Flags.SendMessages]
+            },
+            {
+                id: client.user.id,
+                allow: [
+                    PermissionsBitField.Flags.ViewChannel,
+                    PermissionsBitField.Flags.SendMessages,
+                    PermissionsBitField.Flags.ReadMessageHistory,
+                    PermissionsBitField.Flags.ManageMessages
+                ]
+            },
+            {
+                id: MANAGER_ROLE_ID,
+                allow: [
+                    PermissionsBitField.Flags.ViewChannel,
+                    PermissionsBitField.Flags.ReadMessageHistory
+                ]
+            }
+        ]
+    });
+}
+
+async function getDashboardStats(guild) {
+    await guild.members.fetch();
+    await guild.channels.fetch();
+
+    const vaRole = await guild.roles.fetch(VA_ROLE_ID).catch(() => null);
+    const compteCreeRole = await guild.roles.fetch(COMPTE_CREE_ROLE_ID).catch(() => null);
+
+    const openChannelsCount = guild.channels.cache.filter(channel =>
+        channel.type === ChannelType.GuildText &&
+        [CATEGORY_ID, COMPTE_CREE_CATEGORY_ID].includes(channel.parentId)
+    ).size;
+
+    return {
+        activeVaCount: vaRole ? vaRole.members.size : 0,
+        createdAccountsCount: compteCreeRole ? compteCreeRole.members.size : 0,
+        openChannelsCount
+    };
+}
+
+function buildDashboardEmbed(guild, stats) {
+    return new EmbedBuilder()
+        .setColor(0x2ECC71)
+        .setTitle('📊 Dashboard Lysen Agency')
+        .setDescription('Statut actuel du bot et de l’activité VA.')
+        .addFields(
+            {
+                name: '👥 VA actifs',
+                value: `${stats.activeVaCount}`,
+                inline: true
+            },
+            {
+                name: '📱 Comptes créés',
+                value: `${stats.createdAccountsCount}`,
+                inline: true
+            },
+            {
+                name: '🔓 Salons ouverts',
+                value: `${stats.openChannelsCount}`,
+                inline: true
+            },
+            {
+                name: '🤖 Statut du bot',
+                value: '🟢 ONLINE',
+                inline: true
+            }
+        )
+        .setFooter({ text: guild.name })
+        .setTimestamp();
+}
+
+async function getDashboardMessage(channel) {
+    const cachedMessageId = dashboardMessages.get(channel.guild.id);
+
+    if (cachedMessageId) {
+        const cachedMessage = await channel.messages.fetch(cachedMessageId).catch(() => null);
+        if (cachedMessage) return cachedMessage;
+    }
+
+    const messages = await channel.messages.fetch({ limit: 100 });
+    const botMessages = messages
+        .filter(message => message.author.id === client.user.id)
+        .sort((first, second) => second.createdTimestamp - first.createdTimestamp);
+
+    const dashboardMessage = botMessages.first() || null;
+    const duplicateMessages = botMessages.filter(message => message.id !== dashboardMessage?.id);
+
+    for (const duplicateMessage of duplicateMessages.values()) {
+        await duplicateMessage.delete().catch(() => null);
+    }
+
+    if (dashboardMessage) {
+        dashboardMessages.set(channel.guild.id, dashboardMessage.id);
+    }
+
+    return dashboardMessage;
+}
+
+async function updateDashboard(guild) {
+    try {
+        const channel = await getDashboardChannel(guild);
+        const stats = await getDashboardStats(guild);
+        const embed = buildDashboardEmbed(guild, stats);
+        const dashboardMessage = await getDashboardMessage(channel);
+
+        if (dashboardMessage) {
+            await dashboardMessage.edit({ content: '', embeds: [embed] });
+            return;
+        }
+
+        const sentMessage = await channel.send({ embeds: [embed] });
+        dashboardMessages.set(guild.id, sentMessage.id);
+    } catch (error) {
+        console.log('❌ Erreur dashboard');
+        console.log(error);
+    }
+}
+
+async function updateAllDashboards() {
+    for (const guild of client.guilds.cache.values()) {
+        await updateDashboard(guild);
+    }
+}
+
+client.once('ready', async () => {
     console.log(`🔥 Bot connecté : ${client.user.tag}`);
+
+    await updateAllDashboards();
+    setInterval(updateAllDashboards, DASHBOARD_UPDATE_INTERVAL_MS);
 });
 
 // ========================================
@@ -126,6 +279,8 @@ on te créera automatiquement un nouveau salon privé pour passer à la suite.
                 content: `✅ Ton salon privé a été créé : ${channel}`,
                 ephemeral: true
             });
+
+            await updateDashboard(interaction.guild);
 
         } catch (error) {
 
@@ -308,6 +463,7 @@ Créer un compte Threads peut énormément aider ton compte à faire plus de vue
                 await message.channel.delete();
 
                 console.log('🔥 Ancien salon supprimé');
+                await updateDashboard(message.guild);
 
             } catch (err) {
 
@@ -316,6 +472,8 @@ Créer un compte Threads peut énormément aider ton compte à faire plus de vue
             }
 
         }, 3000);
+
+        await updateDashboard(message.guild);
 
     } catch (error) {
 
