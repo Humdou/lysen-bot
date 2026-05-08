@@ -4,6 +4,8 @@ const CATEGORY_ID = '1502055567760425122';
 const COMPTE_CREE_CATEGORY_ID = '1502120982591045805';
 const DASHBOARD_CHANNEL_NAME = '📊・dashboard';
 const DASHBOARD_UPDATE_INTERVAL_MS = 12 * 60 * 60 * 1000;
+const INSTAGRAM_WEB_PROFILE_URL = 'https://www.instagram.com/api/v1/users/web_profile_info/';
+const INSTAGRAM_REQUIRED_HIGHLIGHTS = 2;
 
 const VA_ROLE_ID = '1502068514264055909';
 const COMPTE_CREE_ROLE_ID = '1502084425092169749';
@@ -27,6 +29,203 @@ const client = new Client({
 });
 
 const dashboardMessages = new Map();
+
+// ========================================
+// VALIDATION INSTAGRAM
+// ========================================
+
+function extractInstagramUsername(content) {
+    const instagramUrlMatch = content.match(/https?:\/\/(?:www\.)?(?:instagram\.com|instagr\.am)\/([A-Za-z0-9._]+)/i);
+
+    if (!instagramUrlMatch) return null;
+
+    const username = instagramUrlMatch[1].replace(/^@/, '').toLowerCase();
+    const reservedPaths = ['p', 'reel', 'reels', 'stories', 'explore', 'accounts', 'direct'];
+
+    if (!username || reservedPaths.includes(username)) return null;
+
+    return username;
+}
+
+function buildInstagramProfileUrl(username) {
+    const url = new URL(INSTAGRAM_WEB_PROFILE_URL);
+    url.searchParams.set('username', username);
+
+    return url;
+}
+
+async function fetchInstagramProfile(username) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
+
+    try {
+        // Endpoint web public utilisé par Instagram pour charger les infos visibles du profil.
+        // Aucun navigateur headless n'est nécessaire, ce qui reste léger et compatible Render.
+        const response = await fetch(buildInstagramProfileUrl(username), {
+            signal: controller.signal,
+            headers: {
+                'accept': 'application/json',
+                'accept-language': 'fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7',
+                'sec-fetch-dest': 'empty',
+                'sec-fetch-mode': 'cors',
+                'sec-fetch-site': 'same-origin',
+                'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+                'x-ig-app-id': '936619743392459'
+            }
+        });
+
+        if (response.status === 404) {
+            return {
+                ok: false,
+                reason: 'not_found'
+            };
+        }
+
+        if (!response.ok) {
+            return {
+                ok: false,
+                reason: 'instagram_unavailable'
+            };
+        }
+
+        const data = await response.json();
+        const profile = data?.data?.user;
+
+        if (!profile) {
+            return {
+                ok: false,
+                reason: 'instagram_unavailable'
+            };
+        }
+
+        return {
+            ok: true,
+            profile
+        };
+    } catch (error) {
+        console.log('❌ Erreur analyse Instagram');
+        console.log(error);
+
+        return {
+            ok: false,
+            reason: 'instagram_unavailable'
+        };
+    } finally {
+        clearTimeout(timeout);
+    }
+}
+
+function validateInstagramProfile(profile) {
+    const missingItems = [];
+    const biography = profile.biography || '';
+    const highlightCount = Number(profile.highlight_reel_count || 0);
+    const hasProfilePicture = Boolean(profile.profile_pic_url || profile.profile_pic_url_hd) &&
+        profile.has_anonymous_profile_picture !== true;
+
+    if (!biography.trim()) {
+        missingItems.push({
+            summary: 'il manque une bio',
+            details: 'Ajoute une bio sur le profil Instagram.'
+        });
+    }
+
+    if (!hasProfilePicture) {
+        missingItems.push({
+            summary: 'il manque une photo de profil',
+            details: 'Ajoute une photo de profil.'
+        });
+    }
+
+    if (highlightCount !== INSTAGRAM_REQUIRED_HIGHLIGHTS) {
+        const missingHighlightCount = Math.max(INSTAGRAM_REQUIRED_HIGHLIGHTS - highlightCount, 0);
+        const extraHighlightCount = Math.max(highlightCount - INSTAGRAM_REQUIRED_HIGHLIGHTS, 0);
+
+        missingItems.push({
+            summary: missingHighlightCount > 0
+                ? `il manque ${missingHighlightCount} highlight${missingHighlightCount > 1 ? 's' : ''}`
+                : `il faut supprimer ${extraHighlightCount} highlight${extraHighlightCount > 1 ? 's' : ''}`,
+            details: `Le compte doit avoir exactement ${INSTAGRAM_REQUIRED_HIGHLIGHTS} highlights. Actuellement : ${highlightCount}.`
+        });
+    }
+
+    return {
+        isValid: missingItems.length === 0,
+        missingItems,
+        highlightCount
+    };
+}
+
+function formatMissingItems(missingItems) {
+    const summaries = missingItems.map(item => item.summary);
+    const sentence = summaries.length === 1
+        ? summaries[0]
+        : `${summaries.slice(0, -1).join(', ')} et ${summaries[summaries.length - 1]}`;
+
+    return sentence.charAt(0).toUpperCase() + sentence.slice(1);
+}
+
+function formatValidationDetails(missingItems) {
+    return missingItems.map(item => `• ${item.details}`).join('\n');
+}
+
+function getValidatedChannelName(username) {
+    const safeUsername = username
+        .toLowerCase()
+        .replace(/[^a-z0-9_-]/g, '-')
+        .replace(/-+/g, '-')
+        .replace(/^-|-$/g, '')
+        .slice(0, 80);
+
+    return `cpt-${safeUsername || 'instagram'}-✅`;
+}
+
+async function validateInstagramAccount(message, username) {
+    await message.channel.send('🔎 Analyse automatique du compte Instagram en cours...');
+
+    const result = await fetchInstagramProfile(username);
+
+    if (!result.ok) {
+        const errorMessage = result.reason === 'not_found'
+            ? `❌ Impossible de trouver le compte Instagram **@${username}**. Vérifie le lien puis renvoie-le ici.`
+            : '❌ Impossible d’analyser le compte Instagram pour le moment. Réessaie en renvoyant le lien dans quelques minutes.';
+
+        await message.channel.send(errorMessage);
+        return;
+    }
+
+    const validation = validateInstagramProfile(result.profile);
+
+    if (!validation.isValid) {
+        await message.channel.send(`
+❌ **Compte Instagram non valide**
+
+${formatMissingItems(validation.missingItems)}.
+
+${formatValidationDetails(validation.missingItems)}
+
+Corrige le compte, puis renvoie le lien Instagram ici pour une nouvelle vérification automatique.
+        `);
+        return;
+    }
+
+    const updatedChannel = await message.channel.setName(getValidatedChannelName(username));
+
+    await message.channel.send(`
+✅ **Compte Instagram valide**
+
+Bio présente.
+Photo de profil présente.
+Exactement ${INSTAGRAM_REQUIRED_HIGHLIGHTS} highlights.
+
+Le salon a été renommé en **${updatedChannel.name}**.
+    `);
+
+    await updateDashboard(message.guild);
+}
+
+// ========================================
+// DASHBOARD
+// ========================================
 
 async function getDashboardChannel(guild) {
     await guild.channels.fetch();
@@ -272,7 +471,7 @@ https://instagram.com/nomducompte
 ━━━━━━━━━━━━━━
 
 🔥 Une fois le lien envoyé,
-on te créera automatiquement un nouveau salon privé pour passer à la suite.
+le bot vérifiera automatiquement ton compte Instagram.
             `);
 
             await interaction.reply({
@@ -368,112 +567,13 @@ client.on('messageCreate', async message => {
         // Vérifie salon privé utilisateur
         if (message.channel.topic !== message.author.id) return;
 
-        // Vérifie lien Instagram
-        const content = message.content.toLowerCase();
+        const instagramUsername = extractInstagramUsername(message.content);
 
-        if (
-            !content.includes('instagram.com') &&
-            !content.includes('instagr.am') &&
-            !content.includes('https://')
-        ) return;
+        if (!instagramUsername) return;
 
-        console.log('🔥 Lien Instagram détecté');
+        console.log(`🔥 Lien Instagram détecté : @${instagramUsername}`);
 
-        const member = message.member;
-
-        // Retire ancien rôle
-        if (member.roles.cache.has(VA_ROLE_ID)) {
-            await member.roles.remove(VA_ROLE_ID);
-        }
-
-        // Ajoute nouveau rôle
-        if (!member.roles.cache.has(COMPTE_CREE_ROLE_ID)) {
-            await member.roles.add(COMPTE_CREE_ROLE_ID);
-        }
-
-        console.log('🔥 Rôles modifiés');
-
-        // Crée nouveau salon
-        const newChannel = await message.guild.channels.create({
-            name: `compte-${message.author.username}-👍`,
-            type: ChannelType.GuildText,
-            parent: COMPTE_CREE_CATEGORY_ID,
-            topic: message.author.id,
-
-            permissionOverwrites: [
-                {
-                    id: message.guild.id,
-                    deny: [PermissionsBitField.Flags.ViewChannel],
-                },
-                {
-                    id: message.author.id,
-                    allow: [
-                        PermissionsBitField.Flags.ViewChannel,
-                        PermissionsBitField.Flags.SendMessages,
-                        PermissionsBitField.Flags.ReadMessageHistory
-                    ],
-                },
-                {
-                    id: MANAGER_ROLE_ID,
-                    allow: [
-                        PermissionsBitField.Flags.ViewChannel,
-                        PermissionsBitField.Flags.SendMessages,
-                        PermissionsBitField.Flags.ReadMessageHistory
-                    ],
-                },
-            ],
-        });
-
-        console.log('🔥 Nouveau salon créé');
-
-        // Message dans nouveau salon
-        const sentMessage = await newChannel.send(`
-📸 **Compte Instagram détecté :**
-
-${message.content}
-
-━━━━━━━━━━━━━━
-
-✅ Ton compte a bien été validé.
-
-🔥 Continue maintenant :
-• ton warm-up ;
-• tes reels ;
-• ta régularité.
-
-📚 Ressources utiles :
-➜ <#1485480560741847212>
-➜ <#1485480522023964772>
-
-🚀 Petit conseil :
-Créer un compte Threads peut énormément aider ton compte à faire plus de vues.
-
-━━━━━━━━━━━━━━
-        `);
-
-        await sentMessage.pin();
-
-        console.log('🔥 Message envoyé');
-
-        // Supprime ancien salon après délai
-        setTimeout(async () => {
-
-            try {
-
-                await message.channel.delete();
-
-                console.log('🔥 Ancien salon supprimé');
-                await updateDashboard(message.guild);
-
-            } catch (err) {
-
-                console.log('❌ Erreur suppression salon');
-                console.log(err);
-            }
-
-        }, 3000);
-
-        await updateDashboard(message.guild);
+        await validateInstagramAccount(message, instagramUsername);
 
     } catch (error) {
 
