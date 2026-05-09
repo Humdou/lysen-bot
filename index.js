@@ -5,8 +5,8 @@ const COMPTE_CREE_CATEGORY_ID = '1502120982591045805';
 const DASHBOARD_CHANNEL_NAME = '📊・dashboard';
 const DASHBOARD_UPDATE_INTERVAL_MS = 12 * 60 * 60 * 1000;
 const INSTAGRAM_BASE_URL = 'https://www.instagram.com';
-const VA_ACTIVE_CATEGORY_NAME = 'VA actif 👨‍💼';
-const VA_OP_CATEGORY_NAME = 'VA OP';
+const VA_ACTIVE_CATEGORY_NAME = 'VA ACTIF 😎';
+const VA_OP_CATEGORY_NAME = 'VA OP ☑️';
 
 const VA_ROLE_ID = '1502068514264055909';
 const COMPTE_CREE_ROLE_ID = '1502084425092169749';
@@ -356,15 +356,15 @@ function formatValidationDetails(missingItems) {
     return missingItems.map(item => `- ${item}`).join('\n');
 }
 
-function getValidatedChannelName(instagramUsername) {
-    const safeUsername = instagramUsername
+function getVaChannelName(discordUsername, isValidated = false) {
+    const safeUsername = discordUsername
         .toLowerCase()
         .replace(/[^a-z0-9_-]/g, '-')
         .replace(/-+/g, '-')
         .replace(/^-|-$/g, '')
         .slice(0, 80);
 
-    return `cpt-${safeUsername || 'va'}-✅`;
+    return `cpt-${safeUsername || 'va'}${isValidated ? '-✅' : ''}`;
 }
 
 async function getCategoryByNameOrId(guild, categoryName, fallbackId) {
@@ -392,8 +392,63 @@ async function sendDiscordMessage(channel, content) {
     }
 }
 
+async function sendAndPinVaOpMessage(channel, instagramUrl) {
+    const sentMessage = await channel.send(`
+📸 **Compte Instagram détecté :**
+
+${instagramUrl}
+
+━━━━━━━━━━━━━━
+
+✅ Ton compte est en cours de vérification automatique.
+
+🔥 Continue maintenant :
+• ton warm-up ;
+• tes reels ;
+• ta régularité.
+
+📚 Ressources utiles :
+➜ <#1485480560741847212>
+➜ <#1485480522023964772>
+
+🚀 Petit conseil :
+Créer un compte Threads peut énormément aider ton compte à faire plus de vues.
+
+━━━━━━━━━━━━━━
+    `);
+
+    await sentMessage.pin().catch(error => {
+        console.log('[Discord] Impossible d’épingler le message VA OP.');
+        console.log(error?.message || error);
+    });
+}
+
+async function updateVaOpRoles(message) {
+    const member = await message.guild.members.fetch(message.author.id);
+
+    try {
+        if (!member.roles.cache.has(COMPTE_CREE_ROLE_ID)) {
+            await member.roles.add(COMPTE_CREE_ROLE_ID);
+            console.log(`[Discord] Rôle VA OP ajouté à ${message.author.id}.`);
+        }
+    } catch (error) {
+        console.log('[Discord] Impossible d’ajouter le rôle VA OP.');
+        console.log(error?.message || error);
+    }
+
+    try {
+        if (member.roles.cache.has(VA_ROLE_ID)) {
+            await member.roles.remove(VA_ROLE_ID);
+            console.log(`[Discord] Rôle VA ACTIF retiré à ${message.author.id}.`);
+        }
+    } catch (error) {
+        console.log('[Discord] Impossible de retirer le rôle VA ACTIF.');
+        console.log(error?.message || error);
+    }
+}
+
 async function createInstagramWorkflowChannel(message, username) {
-    const finalChannelName = getValidatedChannelName(username);
+    const finalChannelName = getVaChannelName(message.author.username);
     const vaOpCategory = await getCategoryByNameOrId(
         message.guild,
         VA_OP_CATEGORY_NAME,
@@ -412,6 +467,9 @@ async function createInstagramWorkflowChannel(message, username) {
         if (existingFinalChannel.name !== finalChannelName) {
             await existingFinalChannel.setName(finalChannelName);
         }
+
+        await updateVaOpRoles(message);
+        await sendAndPinVaOpMessage(existingFinalChannel, message.content);
 
         if (existingFinalChannel.id !== message.channel.id) {
             await message.channel.delete().catch(error => {
@@ -453,6 +511,9 @@ async function createInstagramWorkflowChannel(message, username) {
         ],
     });
 
+    await updateVaOpRoles(message);
+    await sendAndPinVaOpMessage(finalChannel, message.content);
+
     if (message.channel.id !== finalChannel.id) {
         await message.channel.delete().catch(error => {
             console.log('[Discord] Impossible de supprimer l’ancien salon.');
@@ -464,7 +525,7 @@ async function createInstagramWorkflowChannel(message, username) {
     return finalChannel;
 }
 
-async function validateInstagramAccount(channel, username) {
+async function validateInstagramAccount(channel, username, discordUsername) {
     try {
         const result = await fetchPublicInstagramProfile(username);
 
@@ -488,14 +549,21 @@ ${formatValidationDetails(validation.missingItems)}
             return;
         }
 
+        const validatedChannelName = getVaChannelName(discordUsername, true);
+
+        if (channel.name !== validatedChannelName) {
+            await channel.setName(validatedChannelName);
+        }
+
         await sendDiscordMessage(channel, `
-✅ Compte Instagram valide : @${username}
+✅ Compte Instagram valide
 
-✅ Bio détectée
-✅ Photo de profil détectée
-✅ ${result.profile.postCount} post détecté${result.profile.postCount > 1 ? 's' : ''}
+Le compte respecte toutes les conditions :
+• bio
+• photo de profil
+• au moins 1 post
 
-Salon déplacé vers salon privé 2.
+Le salon a été validé automatiquement.
         `);
     } catch (error) {
         console.log('[Instagram] Erreur imprévue pendant la validation.');
@@ -872,7 +940,7 @@ client.on('messageCreate', async message => {
 
         try {
             const workflowChannel = await createInstagramWorkflowChannel(message, instagramUsername);
-            await validateInstagramAccount(workflowChannel, instagramUsername);
+            await validateInstagramAccount(workflowChannel, instagramUsername, message.author.username);
         } finally {
             instagramValidationsInProgress.delete(workflowKey);
         }
