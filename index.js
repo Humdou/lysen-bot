@@ -6,7 +6,6 @@ const DASHBOARD_CHANNEL_NAME = '📊・dashboard';
 const DASHBOARD_UPDATE_INTERVAL_MS = 12 * 60 * 60 * 1000;
 const INSTAGRAM_WEB_PROFILE_URL = 'https://www.instagram.com/api/v1/users/web_profile_info/';
 const INSTAGRAM_PROFILE_PAGE_URL = 'https://www.instagram.com/';
-const INSTAGRAM_REQUIRED_HIGHLIGHTS = 2;
 
 const VA_ROLE_ID = '1502068514264055909';
 const COMPTE_CREE_ROLE_ID = '1502084425092169749';
@@ -59,29 +58,8 @@ function buildInstagramProfilePageUrl(username) {
     return `${INSTAGRAM_PROFILE_PAGE_URL}${username}/`;
 }
 
-function getInstagramCookieHeader() {
-    if (process.env.INSTAGRAM_COOKIE) {
-        return process.env.INSTAGRAM_COOKIE;
-    }
-
-    if (process.env.INSTAGRAM_SESSION_ID) {
-        return `sessionid=${process.env.INSTAGRAM_SESSION_ID}`;
-    }
-
-    return null;
-}
-
-function getInstagramCsrfToken(cookieHeader) {
-    if (!cookieHeader) return null;
-
-    const csrfMatch = cookieHeader.match(/(?:^|;\s*)csrftoken=([^;]+)/);
-    return csrfMatch ? csrfMatch[1] : null;
-}
-
 function getInstagramHeaders({ accept = 'application/json', referer = INSTAGRAM_PROFILE_PAGE_URL } = {}) {
-    const cookieHeader = getInstagramCookieHeader();
-    const csrfToken = getInstagramCsrfToken(cookieHeader);
-    const headers = {
+    return {
         accept,
         'accept-language': 'fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7',
         referer,
@@ -93,17 +71,6 @@ function getInstagramHeaders({ accept = 'application/json', referer = INSTAGRAM_
         'x-ig-app-id': '936619743392459',
         'x-requested-with': 'XMLHttpRequest'
     };
-
-    if (cookieHeader) {
-        headers.cookie = cookieHeader;
-        console.log('[Instagram] Cookie fournie via variable d’environnement.');
-    }
-
-    if (csrfToken) {
-        headers['x-csrftoken'] = csrfToken;
-    }
-
-    return headers;
 }
 
 function decodeHtmlEntities(value = '') {
@@ -152,9 +119,6 @@ function normalizeInstagramProfile(profile, source) {
     return {
         source,
         biography: profile.biography || '',
-        highlightCount: typeof profile.highlight_reel_count === 'number'
-            ? profile.highlight_reel_count
-            : null,
         hasProfilePicture: Boolean(profile.profile_pic_url || profile.profile_pic_url_hd) &&
             profile.has_anonymous_profile_picture !== true
     };
@@ -229,7 +193,6 @@ async function fetchInstagramProfileFromWebApi(username) {
 
     console.log(`[Instagram][web_api] Bio: ${Boolean(normalizedProfile.biography.trim())}`);
     console.log(`[Instagram][web_api] Photo: ${normalizedProfile.hasProfilePicture}`);
-    console.log(`[Instagram][web_api] Highlights: ${normalizedProfile.highlightCount}`);
 
     return {
         ok: true,
@@ -267,8 +230,7 @@ function parseInstagramProfileFromHtml(html) {
     return {
         source: 'html',
         biography,
-        hasProfilePicture,
-        highlightCount: null
+        hasProfilePicture
     };
 }
 
@@ -310,7 +272,6 @@ async function fetchInstagramProfileFromHtml(username) {
 
     console.log(`[Instagram][html] Bio: ${Boolean(profile.biography.trim())}`);
     console.log(`[Instagram][html] Photo: ${profile.hasProfilePicture}`);
-    console.log('[Instagram][html] Highlights: indisponible dans le HTML public.');
 
     if (!profile.biography && !profile.hasProfilePicture) {
         return {
@@ -331,15 +292,13 @@ function mergeInstagramProfiles(primaryProfile, fallbackProfile) {
     return {
         source: `${primaryProfile.source}+${fallbackProfile.source}`,
         biography: primaryProfile.biography || fallbackProfile.biography || '',
-        hasProfilePicture: primaryProfile.hasProfilePicture || fallbackProfile.hasProfilePicture,
-        highlightCount: primaryProfile.highlightCount ?? fallbackProfile.highlightCount
+        hasProfilePicture: primaryProfile.hasProfilePicture || fallbackProfile.hasProfilePicture
     };
 }
 
 async function fetchInstagramProfile(username) {
     console.log('====================');
     console.log(`[Instagram] Analyse du profil @${username}`);
-    console.log(`[Instagram] Auth optionnelle: ${getInstagramCookieHeader() ? 'cookie/session configurée' : 'aucune cookie/session'}`);
     console.log('====================');
 
     try {
@@ -391,7 +350,6 @@ async function fetchInstagramProfile(username) {
 function validateInstagramProfile(profile) {
     const missingItems = [];
     const biography = profile.biography || '';
-    const highlightCount = typeof profile.highlightCount === 'number' ? profile.highlightCount : null;
     const hasProfilePicture = profile.hasProfilePicture === true;
 
     if (!biography.trim()) {
@@ -408,27 +366,9 @@ function validateInstagramProfile(profile) {
         });
     }
 
-    if (highlightCount === null) {
-        missingItems.push({
-            summary: 'le nombre de highlights n’a pas pu être vérifié',
-            details: 'Instagram n’a pas renvoyé le compteur de highlights. Configure INSTAGRAM_COOKIE ou INSTAGRAM_SESSION_ID sur Render pour fiabiliser cette vérification.'
-        });
-    } else if (highlightCount !== INSTAGRAM_REQUIRED_HIGHLIGHTS) {
-        const missingHighlightCount = Math.max(INSTAGRAM_REQUIRED_HIGHLIGHTS - highlightCount, 0);
-        const extraHighlightCount = Math.max(highlightCount - INSTAGRAM_REQUIRED_HIGHLIGHTS, 0);
-
-        missingItems.push({
-            summary: missingHighlightCount > 0
-                ? `il manque ${missingHighlightCount} highlight${missingHighlightCount > 1 ? 's' : ''}`
-                : `il faut supprimer ${extraHighlightCount} highlight${extraHighlightCount > 1 ? 's' : ''}`,
-            details: `Le compte doit avoir exactement ${INSTAGRAM_REQUIRED_HIGHLIGHTS} highlights. Actuellement : ${highlightCount}.`
-        });
-    }
-
     return {
         isValid: missingItems.length === 0,
-        missingItems,
-        highlightCount
+        missingItems
     };
 }
 
@@ -462,7 +402,7 @@ function getInstagramFetchErrorMessage(reason, username) {
     }
 
     if (reason === 'blocked') {
-        return '❌ Instagram bloque temporairement la récupération du profil depuis le serveur. Réessaie dans quelques minutes. Si ça revient souvent, configure `INSTAGRAM_COOKIE` ou `INSTAGRAM_SESSION_ID` sur Render.';
+        return '❌ Instagram bloque temporairement la récupération du profil depuis le serveur. Réessaie dans quelques minutes.';
     }
 
     return '❌ Impossible d’analyser le compte Instagram pour le moment. Réessaie en renvoyant le lien dans quelques minutes.';
@@ -505,7 +445,6 @@ Corrige le compte, puis renvoie le lien Instagram ici pour une nouvelle vérific
 
 Bio présente.
 Photo de profil présente.
-Exactement ${INSTAGRAM_REQUIRED_HIGHLIGHTS} highlights.
 
 Le salon a été renommé en **${updatedChannel.name}**.
     `);
