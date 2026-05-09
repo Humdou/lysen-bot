@@ -11,6 +11,7 @@ const RAPIDAPI_INSTAGRAM = {
 const REQUIRED_HIGHLIGHTS_COUNT = 2;
 const INSTAGRAM_TEMPORARY_ERROR_MESSAGE = `❌ Vérification Instagram temporairement indisponible.
 Réessaie plus tard.`;
+const INSTAGRAM_MANUAL_REVIEW_MESSAGE = '⚠️ Vérification Instagram impossible actuellement. Un manager vérifiera manuellement le compte.';
 
 const VA_ROLE_ID = '1502068514264055909';
 const COMPTE_CREE_ROLE_ID = '1502084425092169749';
@@ -57,12 +58,6 @@ function extractInstagramUsername(content) {
     if (!username || reservedPaths.includes(username)) return null;
 
     return username;
-}
-
-function isCleanInstagramUsername(username) {
-    const reservedPaths = ['p', 'reel', 'reels', 'stories', 'explore', 'accounts', 'direct'];
-
-    return /^[a-zA-Z0-9._]+$/.test(username) && !reservedPaths.includes(username.toLowerCase());
 }
 
 function decodeHtmlEntities(value = '') {
@@ -395,14 +390,6 @@ function getValidatedChannelName(discordUsername) {
     return `cpt-${safeUsername || 'va'}-✅`;
 }
 
-function getInstagramFetchErrorMessage(reason, username) {
-    if (reason === 'not_found') {
-        return `❌ Impossible de trouver le compte Instagram **@${username}**. Vérifie le lien puis renvoie-le ici.`;
-    }
-
-    return INSTAGRAM_TEMPORARY_ERROR_MESSAGE;
-}
-
 async function sendDiscordMessage(channel, content) {
     try {
         await channel.send(content);
@@ -414,9 +401,25 @@ async function sendDiscordMessage(channel, content) {
 
 async function createValidatedVaOpChannel(message, username, successMessage) {
     await updateVaRoles(message);
+    await message.guild.channels.fetch();
+
+    const finalChannelName = getValidatedChannelName(message.author.username);
+    const existingFinalChannel = message.guild.channels.cache.find(channel =>
+        channel.type === ChannelType.GuildText &&
+        channel.parentId === COMPTE_CREE_CATEGORY_ID &&
+        channel.topic === message.author.id &&
+        channel.name === finalChannelName
+    );
+
+    if (existingFinalChannel) {
+        console.log(`[Discord][SUCCESS] Salon final déjà existant pour ${message.author.id}: ${existingFinalChannel.id}`);
+        await message.channel.delete();
+        await updateDashboard(message.guild);
+        return;
+    }
 
     const channel = await message.guild.channels.create({
-        name: getValidatedChannelName(message.author.username),
+        name: finalChannelName,
         type: ChannelType.GuildText,
         parent: COMPTE_CREE_CATEGORY_ID,
         topic: message.author.id,
@@ -463,30 +466,19 @@ async function validateInstagramAccount(message, username) {
         const result = await fetchInstagramProfileWithRapidApi(username);
 
         if (!result.ok) {
-            console.log(`[RapidAPI] Validation impossible pour @${username}. Raison: ${result.reason}`);
+            console.log(`[RapidAPI][FAIL] Validation impossible pour @${username}. Raison: ${result.reason}`);
             console.log(`[RapidAPI] Endpoint utilisé: ${result.diagnostics?.endpoint || 'inconnu'}`);
             console.log(`[RapidAPI] Status HTTP: ${result.diagnostics?.status ?? 'aucun status'}`);
             console.log(`[RapidAPI] Body complet: ${result.diagnostics?.body ?? 'aucun body'}`);
-
-            if (isCleanInstagramUsername(username)) {
-                console.log(`[RapidAPI] Fallback permissif activé pour @${username}: username regex valide.`);
-                await createValidatedVaOpChannel(
-                    message,
-                    username,
-                    `✅ Compte Instagram détecté : @${username}`
-                );
-                return;
-            }
-
-            await sendDiscordMessage(message.channel, getInstagramFetchErrorMessage(result.reason, username));
+            await sendDiscordMessage(message.channel, INSTAGRAM_MANUAL_REVIEW_MESSAGE);
             return;
         }
 
-        console.log(`[RapidAPI] Profil récupéré via: ${result.profile.source}`);
+        console.log(`[RapidAPI][SUCCESS] Profil récupéré via: ${result.profile.source}`);
 
         const validation = validateInstagramProfile(result.profile);
 
-        console.log(`[RapidAPI] Validation @${username}: ${validation.isValid ? 'valide' : 'non valide'}`);
+        console.log(`[RapidAPI][${validation.isValid ? 'SUCCESS' : 'FAIL'}] Validation @${username}: ${validation.isValid ? 'valide' : 'non valide'}`);
 
         if (!validation.isValid) {
             await sendDiscordMessage(message.channel, `
