@@ -36,7 +36,7 @@ const processedInstagramMessages = new Set();
 // ========================================
 
 function extractInstagramUsername(content) {
-    const instagramUrlMatch = content.match(/(?:https?:\/\/)?(?:www\.)?instagram\.com\/([a-zA-Z0-9._]+)/i);
+    const instagramUrlMatch = content.match(/(?:https?:\/\/)?(?:www\.)?instagram\.com\/([a-zA-Z0-9._]+)(?:[/?#]|$)/i);
 
     if (!instagramUrlMatch) return null;
 
@@ -114,8 +114,12 @@ function extractJsonLd(html) {
 }
 
 function extractJsonStringValue(html, key) {
+    const decodedHtml = decodeHtmlEntities(html)
+        .replace(/\\u0022/g, '"')
+        .replace(/\\"/g, '"')
+        .replace(/\\\//g, '/');
     const pattern = new RegExp(`"${key}"\\s*:\\s*"((?:\\\\.|[^"\\\\])*)"`, 'i');
-    const match = html.match(pattern);
+    const match = decodedHtml.match(pattern);
 
     if (!match) return '';
 
@@ -131,8 +135,14 @@ function parsePublicInstagramPage(html, username, status) {
     const ogDescription = extractMetaContent(html, 'og:description');
     const ogImage = extractMetaContent(html, 'og:image');
     const canonicalUrl = extractMetaContent(html, 'og:url');
+    const ogTitle = extractMetaContent(html, 'og:title');
+    const searchableHtml = decodeHtmlEntities(html)
+        .replace(/\\u0022/g, '"')
+        .replace(/\\"/g, '"')
+        .replace(/\\\//g, '/');
     const rawBiography = extractJsonStringValue(html, 'biography') ||
         extractJsonStringValue(html, 'bio') ||
+        searchableHtml.match(/"biography_with_entities"\s*:\s*\{[^}]*"raw_text"\s*:\s*"((?:\\.|[^"\\])*)"/i)?.[1] ||
         jsonLd?.description ||
         '';
     const rawProfilePicture = extractJsonStringValue(html, 'profile_pic_url_hd') ||
@@ -141,22 +151,28 @@ function parsePublicInstagramPage(html, username, status) {
         jsonLd?.image ||
         ogImage ||
         '';
-    const mediaCountMatch = html.match(/"edge_owner_to_timeline_media"\s*:\s*\{\s*"count"\s*:\s*(\d+)/) ||
-        html.match(/"media_count"\s*:\s*(\d+)/) ||
-        html.match(/"posts_count"\s*:\s*(\d+)/) ||
-        ogDescription.match(/([\d,.]+)\s+posts?/i);
+    const mediaCountMatch = searchableHtml.match(/"edge_owner_to_timeline_media"\s*:\s*\{\s*"count"\s*:\s*(\d+)/) ||
+        searchableHtml.match(/"media_count"\s*:\s*(\d+)/) ||
+        searchableHtml.match(/"posts_count"\s*:\s*(\d+)/) ||
+        ogDescription.match(/([\d,.]+)\s+(?:posts?|publications?)/i);
     const biography = stripHtml(rawBiography);
     const postCount = mediaCountMatch ? Number(String(mediaCountMatch[1]).replace(/[,.]/g, '')) : 0;
+    const lowerUsername = username.toLowerCase();
     const profileExists = status === 200 &&
         !/Sorry, this page isn't available|Page Not Found|Cette page n’est malheureusement pas disponible/i.test(html) &&
-        (canonicalUrl.toLowerCase().includes(`/${username.toLowerCase()}/`) || html.toLowerCase().includes(username.toLowerCase()));
+        (
+            canonicalUrl.toLowerCase().includes(`/${lowerUsername}/`) ||
+            ogTitle.toLowerCase().includes(`@${lowerUsername}`) ||
+            searchableHtml.toLowerCase().includes(`"username":"${lowerUsername}"`) ||
+            searchableHtml.toLowerCase().includes(`/${lowerUsername}/`)
+        );
 
     return {
         username,
         profileExists,
         biography,
         hasBio: Boolean(biography.trim()),
-        hasProfilePicture: Boolean(rawProfilePicture),
+        hasProfilePicture: Boolean(rawProfilePicture) && !String(rawProfilePicture).includes('44884218_345707102882519_2446069589734326272_n.jpg'),
         postCount: Number.isFinite(postCount) ? postCount : 0
     };
 }
@@ -253,29 +269,80 @@ async function sendDiscordMessage(channel, content) {
     }
 }
 
-async function moveValidatedChannel(message, username) {
-    const newChannelName = getValidatedChannelName(username);
+async function createInstagramWorkflowChannel(message, username) {
+    const finalChannelName = getValidatedChannelName(username);
 
-    if (message.channel.name !== newChannelName) {
-        await message.channel.setName(newChannelName);
+    await message.guild.channels.fetch();
+
+    const existingFinalChannel = message.guild.channels.cache.find(channel =>
+        channel.type === ChannelType.GuildText &&
+        channel.parentId === COMPTE_CREE_CATEGORY_ID &&
+        channel.topic === message.author.id
+    );
+
+    if (existingFinalChannel) {
+        if (existingFinalChannel.name !== finalChannelName) {
+            await existingFinalChannel.setName(finalChannelName);
+        }
+
+        if (existingFinalChannel.id !== message.channel.id) {
+            await message.channel.delete().catch(error => {
+                console.log('[Discord] Impossible de supprimer l’ancien salon.');
+                console.log(error?.message || error);
+            });
+        }
+
+        await updateDashboard(message.guild);
+        return existingFinalChannel;
     }
 
-    if (message.channel.parentId !== COMPTE_CREE_CATEGORY_ID) {
-        await message.channel.setParent(COMPTE_CREE_CATEGORY_ID, {
-            lockPermissions: false
+    const finalChannel = await message.guild.channels.create({
+        name: finalChannelName,
+        type: ChannelType.GuildText,
+        parent: COMPTE_CREE_CATEGORY_ID,
+        topic: message.author.id,
+        permissionOverwrites: [
+            {
+                id: message.guild.id,
+                deny: [PermissionsBitField.Flags.ViewChannel],
+            },
+            {
+                id: message.author.id,
+                allow: [
+                    PermissionsBitField.Flags.ViewChannel,
+                    PermissionsBitField.Flags.SendMessages,
+                    PermissionsBitField.Flags.ReadMessageHistory
+                ],
+            },
+            {
+                id: MANAGER_ROLE_ID,
+                allow: [
+                    PermissionsBitField.Flags.ViewChannel,
+                    PermissionsBitField.Flags.SendMessages,
+                    PermissionsBitField.Flags.ReadMessageHistory
+                ],
+            },
+        ],
+    });
+
+    if (message.channel.id !== finalChannel.id) {
+        await message.channel.delete().catch(error => {
+            console.log('[Discord] Impossible de supprimer l’ancien salon.');
+            console.log(error?.message || error);
         });
     }
 
     await updateDashboard(message.guild);
+    return finalChannel;
 }
 
-async function validateInstagramAccount(message, username) {
+async function validateInstagramAccount(channel, username) {
     try {
         const result = await fetchPublicInstagramProfile(username);
 
         if (!result.ok) {
             console.log(`[Instagram][FAIL] Validation publique impossible pour @${username}.`);
-            await sendDiscordMessage(message.channel, '❌ Vérification Instagram temporairement indisponible. Réessaie plus tard.');
+            await sendDiscordMessage(channel, '❌ Vérification Instagram temporairement indisponible. Réessaie plus tard.');
             return;
         }
 
@@ -284,7 +351,7 @@ async function validateInstagramAccount(message, username) {
         console.log(`[Instagram][${validation.isValid ? 'SUCCESS' : 'FAIL'}] @${username} bio=${result.profile.hasBio} photo=${result.profile.hasProfilePicture} posts=${result.profile.postCount}`);
 
         if (!validation.isValid) {
-            await sendDiscordMessage(message.channel, `
+            await sendDiscordMessage(channel, `
 ❌ **Compte Instagram non valide**
 
 Il manque :
@@ -293,8 +360,7 @@ ${formatValidationDetails(validation.missingItems)}
             return;
         }
 
-        await moveValidatedChannel(message, username);
-        await sendDiscordMessage(message.channel, `
+        await sendDiscordMessage(channel, `
 ✅ Compte Instagram valide : @${username}
 
 ✅ Bio détectée
@@ -306,7 +372,7 @@ Salon déplacé vers salon privé 2.
     } catch (error) {
         console.log('[Instagram] Erreur imprévue pendant la validation.');
         console.log(error?.message || error);
-        await sendDiscordMessage(message.channel, '❌ Vérification Instagram temporairement indisponible. Réessaie plus tard.');
+        await sendDiscordMessage(channel, '❌ Vérification Instagram temporairement indisponible. Réessaie plus tard.');
     }
 }
 
@@ -659,9 +725,9 @@ client.on('messageCreate', async message => {
         processedInstagramMessages.add(message.id);
         setTimeout(() => processedInstagramMessages.delete(message.id), 10 * 60 * 1000);
 
-        const workflowKey = `${message.guild.id}:${message.channel.id}`;
+        const workflowKey = `${message.guild.id}:${message.author.id}`;
 
-        // Verrou par salon: évite deux transitions/réponses si deux liens arrivent en même temps.
+        // Verrou par utilisateur: évite deux transitions/réponses si deux liens arrivent en même temps.
         if (instagramValidationsInProgress.has(workflowKey)) {
             console.log(`[Instagram] Workflow déjà en cours dans ${message.channel.id}, message ignoré: ${message.id}`);
             return;
@@ -677,7 +743,8 @@ client.on('messageCreate', async message => {
         instagramValidationsInProgress.add(workflowKey);
 
         try {
-            await validateInstagramAccount(message, instagramUsername);
+            const workflowChannel = await createInstagramWorkflowChannel(message, instagramUsername);
+            await validateInstagramAccount(workflowChannel, instagramUsername);
         } finally {
             instagramValidationsInProgress.delete(workflowKey);
         }
