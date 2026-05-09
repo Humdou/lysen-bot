@@ -4,14 +4,7 @@ const CATEGORY_ID = '1502055567760425122';
 const COMPTE_CREE_CATEGORY_ID = '1502120982591045805';
 const DASHBOARD_CHANNEL_NAME = '📊・dashboard';
 const DASHBOARD_UPDATE_INTERVAL_MS = 12 * 60 * 60 * 1000;
-const RAPIDAPI_INSTAGRAM = {
-    host: 'instagram120.p.rapidapi.com',
-    postsUrl: 'https://instagram120.p.rapidapi.com/api/instagram/posts'
-};
-const REQUIRED_HIGHLIGHTS_COUNT = 2;
-const INSTAGRAM_TEMPORARY_ERROR_MESSAGE = `❌ Vérification Instagram temporairement indisponible.
-Réessaie plus tard.`;
-const INSTAGRAM_MANUAL_REVIEW_MESSAGE = '⚠️ Vérification Instagram impossible actuellement. Un manager vérifiera manuellement le compte.';
+const INSTAGRAM_BASE_URL = 'https://www.instagram.com';
 
 const VA_ROLE_ID = '1502068514264055909';
 const COMPTE_CREE_ROLE_ID = '1502084425092169749';
@@ -89,354 +82,145 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 15000) {
     }
 }
 
-function findFirstValue(object, keys) {
-    if (!object || typeof object !== 'object') return null;
-
-    for (const key of keys) {
-        if (object[key] !== undefined && object[key] !== null) {
-            return object[key];
-        }
-    }
-
-    for (const value of Object.values(object)) {
-        const nestedValue = findFirstValue(value, keys);
-        if (nestedValue !== null && nestedValue !== undefined) {
-            return nestedValue;
-        }
-    }
-
-    return null;
+function buildInstagramProfileUrl(username) {
+    return `${INSTAGRAM_BASE_URL}/${username}/`;
 }
 
-function getRapidApiProfilePayload(data) {
-    const firstPost = getRapidApiPosts(data)[0] || null;
+function extractMetaContent(html, property) {
+    const metaTags = html.match(/<meta\b[^>]*>/gi) || [];
 
-    return data?.result?.user ||
-        data?.result?.profile ||
-        data?.result?.owner ||
-        data?.result?.edges?.[0]?.node?.user ||
-        data?.result?.edges?.[0]?.node?.owner ||
-        data?.result?.edges?.[0]?.node?.author ||
-        firstPost?.user ||
-        firstPost?.owner ||
-        firstPost?.author ||
-        null;
-}
+    for (const tag of metaTags) {
+        const propertyMatch = tag.match(/(?:property|name)=["']([^"']+)["']/i);
+        if (!propertyMatch || propertyMatch[1] !== property) continue;
 
-function getRapidApiPosts(data) {
-    const edges = data?.result?.edges;
-
-    if (Array.isArray(edges)) {
-        return edges
-            .map(edge => edge?.node)
-            .filter(Boolean);
+        const contentMatch = tag.match(/content=["']([^"']*)["']/i);
+        return contentMatch ? decodeHtmlEntities(contentMatch[1]) : '';
     }
 
-    return [];
+    return '';
 }
 
-function getRapidApiUsername(data, fallbackUsername) {
-    const profile = getRapidApiProfilePayload(data);
-    const firstPost = getRapidApiPosts(data)[0] || {};
-    const username = findFirstValue(profile, ['username', 'user_name', 'login']) ||
-        firstPost?.user?.username ||
-        firstPost?.owner?.username ||
-        firstPost?.author?.username ||
-        firstPost?.caption?.user?.username ||
-        data?.result?.username ||
-        data?.result?.user?.username ||
+function extractJsonLd(html) {
+    const match = html.match(/<script type=["']application\/ld\+json["']>(.*?)<\/script>/is);
+
+    if (!match) return null;
+
+    try {
+        return JSON.parse(decodeHtmlEntities(match[1]));
+    } catch (error) {
+        console.log('[Instagram] JSON-LD illisible.');
+        return null;
+    }
+}
+
+function extractJsonStringValue(html, key) {
+    const pattern = new RegExp(`"${key}"\\s*:\\s*"((?:\\\\.|[^"\\\\])*)"`, 'i');
+    const match = html.match(pattern);
+
+    if (!match) return '';
+
+    try {
+        return JSON.parse(`"${match[1]}"`);
+    } catch (error) {
+        return decodeHtmlEntities(match[1].replace(/\\u0026/g, '&'));
+    }
+}
+
+function parsePublicInstagramPage(html, username, status) {
+    const jsonLd = extractJsonLd(html);
+    const ogDescription = extractMetaContent(html, 'og:description');
+    const ogImage = extractMetaContent(html, 'og:image');
+    const canonicalUrl = extractMetaContent(html, 'og:url');
+    const rawBiography = extractJsonStringValue(html, 'biography') ||
+        extractJsonStringValue(html, 'bio') ||
+        jsonLd?.description ||
         '';
-
-    return typeof username === 'string' ? username.toLowerCase() : '';
-}
-
-function normalizeRapidApiProfile(data) {
-    const profile = getRapidApiProfilePayload(data);
-    const posts = getRapidApiPosts(data);
-    const firstPost = posts[0] || {};
-    const biography = findFirstValue(profile, [
-        'biography',
-        'bio',
-        'biography_text',
-        'biography_with_entities',
-        'about',
-        'description',
-        'raw_text'
-    ]);
-    const profilePicture = findFirstValue(profile, [
-        'profile_pic_url_hd',
-        'profile_pic_url',
-        'profile_picture',
-        'profilePicture',
-        'profile_pic',
-        'hd_profile_pic_url_info',
-        'avatar',
-        'image'
-    ]);
-    const anonymousProfilePicture = findFirstValue(profile, [
-        'has_anonymous_profile_picture',
-        'is_default_profile_pic'
-    ]);
-    const highlights = findFirstValue(profile, [
-        'highlight_reel_count',
-        'highlights_count',
-        'highlight_count',
-        'highlights',
-        'highlight_reels',
-        'story_highlights_count',
-        'total_highlights',
-        'total_highlight_reels'
-    ]);
-
-    const normalizedBiography = typeof biography === 'object'
-        ? biography?.raw_text || biography?.text || ''
-        : biography;
-    const normalizedProfilePicture = typeof profilePicture === 'object'
-        ? profilePicture?.url || profilePicture?.uri || profilePicture?.src
-        : profilePicture;
-    const firstCaptionText = firstPost?.caption?.raw_text ||
-        firstPost?.caption?.text ||
-        firstPost?.caption_text ||
+    const rawProfilePicture = extractJsonStringValue(html, 'profile_pic_url_hd') ||
+        extractJsonStringValue(html, 'profile_pic_url') ||
+        extractJsonStringValue(html, 'profile_picture') ||
+        jsonLd?.image ||
+        ogImage ||
         '';
+    const mediaCountMatch = html.match(/"edge_owner_to_timeline_media"\s*:\s*\{\s*"count"\s*:\s*(\d+)/) ||
+        html.match(/"media_count"\s*:\s*(\d+)/) ||
+        html.match(/"posts_count"\s*:\s*(\d+)/) ||
+        ogDescription.match(/([\d,.]+)\s+posts?/i);
+    const biography = stripHtml(rawBiography);
+    const postCount = mediaCountMatch ? Number(String(mediaCountMatch[1]).replace(/[,.]/g, '')) : 0;
+    const profileExists = status === 200 &&
+        !/Sorry, this page isn't available|Page Not Found|Cette page n’est malheureusement pas disponible/i.test(html) &&
+        (canonicalUrl.toLowerCase().includes(`/${username.toLowerCase()}/`) || html.toLowerCase().includes(username.toLowerCase()));
 
     return {
-        source: 'rapidapi',
-        biography: stripHtml(String(normalizedBiography || '')),
-        hasProfilePicture: Boolean(normalizedProfilePicture) && anonymousProfilePicture !== true,
-        highlightsCount: Array.isArray(highlights)
-            ? highlights.length
-            : Number.isFinite(Number(highlights)) ? Number(highlights) : 0,
-        postsCount: posts.length,
-        firstCaptionText: stripHtml(String(firstCaptionText || ''))
+        username,
+        profileExists,
+        biography,
+        hasBio: Boolean(biography.trim()),
+        hasProfilePicture: Boolean(rawProfilePicture),
+        postCount: Number.isFinite(postCount) ? postCount : 0
     };
 }
 
-function hasRapidApiProfileData(profile, data, requestedUsername) {
-    const payload = getRapidApiProfilePayload(data);
-    const posts = getRapidApiPosts(data);
-    const returnedUsername = getRapidApiUsername(data, requestedUsername);
-
-    return Boolean(payload && typeof payload === 'object') &&
-        Boolean(returnedUsername) &&
-        posts.length > 0;
-}
-
-async function fetchInstagramProfileWithRapidApi(username) {
-    const url = new URL(RAPIDAPI_INSTAGRAM.postsUrl);
-    const requestBody = JSON.stringify({
-        username,
-        maxId: ''
-    });
+async function fetchPublicInstagramProfile(username) {
+    const url = buildInstagramProfileUrl(username);
 
     console.log('====================');
-    console.log(`[RapidAPI] Analyse du profil Instagram @${username}`);
-    console.log(`[RapidAPI] Endpoint préparé: ${url.toString()}`);
-    console.log(`[RapidAPI] Body envoyé: ${requestBody}`);
+    console.log(`[Instagram] Validation publique: @${username}`);
+    console.log(`[Instagram] URL: ${url}`);
     console.log('====================');
-
-    if (!process.env.RAPIDAPI_KEY) {
-        console.log('[RapidAPI] RAPIDAPI_KEY manquante dans les variables d’environnement.');
-        return {
-            ok: false,
-            reason: 'missing_rapidapi_key',
-            diagnostics: {
-                endpoint: url.toString(),
-                status: null,
-                body: null
-            }
-        };
-    }
 
     try {
-        console.log(`[RapidAPI] Host: ${RAPIDAPI_INSTAGRAM.host}`);
-        console.log(`[RapidAPI] Requête: ${url.toString()}`);
-
         const response = await fetchWithTimeout(url, {
-            method: 'POST',
             headers: {
-                'Content-Type': 'application/json',
-                'x-rapidapi-key': process.env.RAPIDAPI_KEY,
-                'x-rapidapi-host': RAPIDAPI_INSTAGRAM.host
-            },
-            body: requestBody
+                'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'accept-language': 'fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7',
+                'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36'
+            }
         });
-        const contentType = response.headers.get('content-type') || 'unknown';
-        const body = await response.text();
+        const html = await response.text();
 
-        console.log(`[RapidAPI] Endpoint utilisé: ${url.toString()}`);
-        console.log(`[RapidAPI] Status: ${response.status}`);
-        console.log(`[RapidAPI] Content-Type: ${contentType}`);
-        console.log(`[RapidAPI] Taille réponse: ${body.length} caractères`);
-        console.log(`[RapidAPI] Réponse API: ${body}`);
+        console.log(`[Instagram] Status: ${response.status}`);
+        console.log(`[Instagram] Taille HTML: ${html.length} caractères`);
 
-        if (response.status === 401 || response.status === 403) {
+        if (!response.ok && response.status !== 404) {
             return {
                 ok: false,
-                reason: 'rapidapi_auth',
-                diagnostics: {
-                    endpoint: url.toString(),
-                    status: response.status,
-                    body
-                }
-            };
-        }
-
-        if (response.status === 429) {
-            console.log('[RapidAPI] Quota dépassé ou rate-limit atteint.');
-            return {
-                ok: false,
-                reason: 'rapidapi_rate_limited',
-                diagnostics: {
-                    endpoint: url.toString(),
-                    status: response.status,
-                    body
-                }
-            };
-        }
-
-        if (response.status === 404) {
-            return {
-                ok: false,
-                reason: 'not_found',
-                diagnostics: {
-                    endpoint: url.toString(),
-                    status: response.status,
-                    body
-                }
-            };
-        }
-
-        if (!response.ok) {
-            console.log(`[RapidAPI] Réponse non OK. Extrait: ${body.slice(0, 180)}`);
-            return {
-                ok: false,
-                reason: 'rapidapi_unavailable',
-                diagnostics: {
-                    endpoint: url.toString(),
-                    status: response.status,
-                    body
-                }
-            };
-        }
-
-        let data;
-
-        try {
-            data = JSON.parse(body);
-        } catch (error) {
-            console.log('[RapidAPI] JSON invalide.');
-            console.log(`[RapidAPI] Extrait: ${body.slice(0, 180)}`);
-            return {
-                ok: false,
-                reason: 'invalid_json',
-                diagnostics: {
-                    endpoint: url.toString(),
-                    status: response.status,
-                    body
-                }
-            };
-        }
-
-        console.log('[RapidAPI][DEBUG] Object.keys(response):', Object.keys(data || {}));
-        console.log('[RapidAPI][DEBUG] Object.keys(response.result || {}):', Object.keys(data?.result || {}));
-        console.log('[RapidAPI][DEBUG] Object.keys(response.result.edges?.[0] || {}):', Object.keys(data?.result?.edges?.[0] || {}));
-        console.log('[RapidAPI][DEBUG] Object.keys(response.result.edges?.[0]?.node || {}):', Object.keys(data?.result?.edges?.[0]?.node || {}));
-
-        const profile = normalizeRapidApiProfile(data);
-
-        console.log(`[RapidAPI] Bio: ${Boolean(profile.biography.trim())}`);
-        console.log(`[RapidAPI] Photo: ${profile.hasProfilePicture}`);
-        console.log(`[RapidAPI] Highlights: ${profile.highlightsCount}`);
-
-        console.log(`[RapidAPI] Posts: ${profile.postsCount}`);
-        console.log(`[RapidAPI] Premier caption présent: ${Boolean(profile.firstCaptionText)}`);
-
-        if (!hasRapidApiProfileData(profile, data, username)) {
-            console.log('[RapidAPI][FAIL] Réponse reçue, mais aucune donnée profil exploitable.');
-            return {
-                ok: false,
-                reason: 'profile_missing',
-                diagnostics: {
-                    endpoint: url.toString(),
-                    status: response.status,
-                    body
-                }
+                reason: 'unavailable'
             };
         }
 
         return {
             ok: true,
-            profile
+            profile: parsePublicInstagramPage(html, username, response.status)
         };
     } catch (error) {
-        console.log('[RapidAPI] Erreur globale pendant la récupération.');
+        console.log('[Instagram] Erreur validation publique.');
         console.log(error?.message || error);
 
         return {
             ok: false,
-            reason: 'rapidapi_unavailable',
-            diagnostics: {
-                endpoint: url.toString(),
-                status: null,
-                body: error?.message || String(error)
-            }
+            reason: 'unavailable'
         };
-    }
-}
-
-async function updateVaRoles(message) {
-    const member = await message.guild.members.fetch(message.author.id);
-
-    try {
-        if (!member.roles.cache.has(COMPTE_CREE_ROLE_ID)) {
-            await member.roles.add(COMPTE_CREE_ROLE_ID);
-            console.log(`[Discord] Rôle VA OP ajouté à ${message.author.id}.`);
-        }
-    } catch (error) {
-        console.log('[Discord] Erreur ajout rôle VA OP.');
-        console.log(error);
-    }
-
-    try {
-        if (member.roles.cache.has(VA_ROLE_ID)) {
-            await member.roles.remove(VA_ROLE_ID);
-            console.log(`[Discord] Ancien rôle VA retiré à ${message.author.id}.`);
-        }
-    } catch (error) {
-        console.log('[Discord] Erreur retrait ancien rôle VA.');
-        console.log(error);
     }
 }
 
 function validateInstagramProfile(profile) {
     const missingItems = [];
-    const biography = profile.biography || '';
-    const hasProfilePicture = profile.hasProfilePicture === true;
-    const highlightsCount = Number(profile.highlightsCount || 0);
 
-    if (!biography.trim()) {
-        missingItems.push({
-            summary: 'il manque une bio',
-            details: 'Ajoute une bio sur le profil Instagram.'
-        });
+    if (!profile.profileExists) {
+        missingItems.push('profil introuvable');
     }
 
-    if (!hasProfilePicture) {
-        missingItems.push({
-            summary: 'il manque une photo de profil',
-            details: 'Ajoute une photo de profil.'
-        });
+    if (!profile.hasBio) {
+        missingItems.push('bio');
     }
 
-    if (highlightsCount !== REQUIRED_HIGHLIGHTS_COUNT) {
-        const summary = highlightsCount < REQUIRED_HIGHLIGHTS_COUNT
-            ? `il manque ${REQUIRED_HIGHLIGHTS_COUNT - highlightsCount} highlight${REQUIRED_HIGHLIGHTS_COUNT - highlightsCount > 1 ? 's' : ''}`
-            : `il faut supprimer ${highlightsCount - REQUIRED_HIGHLIGHTS_COUNT} highlight${highlightsCount - REQUIRED_HIGHLIGHTS_COUNT > 1 ? 's' : ''}`;
+    if (!profile.hasProfilePicture) {
+        missingItems.push('photo de profil');
+    }
 
-        missingItems.push({
-            summary,
-            details: `Le compte doit avoir exactement ${REQUIRED_HIGHLIGHTS_COUNT} highlights. Actuellement : ${highlightsCount}.`
-        });
+    if (profile.postCount < 1) {
+        missingItems.push('au moins 1 post');
     }
 
     return {
@@ -445,21 +229,12 @@ function validateInstagramProfile(profile) {
     };
 }
 
-function formatMissingItems(missingItems) {
-    const summaries = missingItems.map(item => item.summary);
-    const sentence = summaries.length === 1
-        ? summaries[0]
-        : `${summaries.slice(0, -1).join(', ')} et ${summaries[summaries.length - 1]}`;
-
-    return sentence.charAt(0).toUpperCase() + sentence.slice(1);
-}
-
 function formatValidationDetails(missingItems) {
-    return missingItems.map(item => `• ${item.details}`).join('\n');
+    return missingItems.map(item => `- ${item}`).join('\n');
 }
 
-function getValidatedChannelName(discordUsername) {
-    const safeUsername = discordUsername
+function getValidatedChannelName(instagramUsername) {
+    const safeUsername = instagramUsername
         .toLowerCase()
         .replace(/[^a-z0-9_-]/g, '-')
         .replace(/-+/g, '-')
@@ -478,105 +253,60 @@ async function sendDiscordMessage(channel, content) {
     }
 }
 
-async function createValidatedVaOpChannel(message, username, successMessage) {
-    await updateVaRoles(message);
-    await message.guild.channels.fetch();
+async function moveValidatedChannel(message, username) {
+    const newChannelName = getValidatedChannelName(username);
 
-    const finalChannelName = getValidatedChannelName(message.author.username);
-    const existingFinalChannel = message.guild.channels.cache.find(channel =>
-        channel.type === ChannelType.GuildText &&
-        channel.parentId === COMPTE_CREE_CATEGORY_ID &&
-        channel.topic === message.author.id &&
-        channel.name === finalChannelName
-    );
-
-    if (existingFinalChannel) {
-        console.log(`[Discord][SUCCESS] Salon final déjà existant pour ${message.author.id}: ${existingFinalChannel.id}`);
-        await message.channel.delete();
-        await updateDashboard(message.guild);
-        return;
+    if (message.channel.name !== newChannelName) {
+        await message.channel.setName(newChannelName);
     }
 
-    const channel = await message.guild.channels.create({
-        name: finalChannelName,
-        type: ChannelType.GuildText,
-        parent: COMPTE_CREE_CATEGORY_ID,
-        topic: message.author.id,
-        permissionOverwrites: [
-            {
-                id: message.guild.id,
-                deny: [PermissionsBitField.Flags.ViewChannel],
-            },
-            {
-                id: message.author.id,
-                allow: [
-                    PermissionsBitField.Flags.ViewChannel,
-                    PermissionsBitField.Flags.SendMessages,
-                    PermissionsBitField.Flags.ReadMessageHistory
-                ],
-            },
-            {
-                id: MANAGER_ROLE_ID,
-                allow: [
-                    PermissionsBitField.Flags.ViewChannel,
-                    PermissionsBitField.Flags.SendMessages,
-                    PermissionsBitField.Flags.ReadMessageHistory
-                ],
-            },
-        ],
-    });
+    if (message.channel.parentId !== COMPTE_CREE_CATEGORY_ID) {
+        await message.channel.setParent(COMPTE_CREE_CATEGORY_ID, {
+            lockPermissions: false
+        });
+    }
 
-    await channel.send(successMessage || `
-✅ **Compte Instagram valide**
-
-Bio présente.
-Photo de profil présente.
-Exactement ${REQUIRED_HIGHLIGHTS_COUNT} highlights.
-
-Compte analysé : @${username}
-    `);
-
-    await message.channel.delete();
     await updateDashboard(message.guild);
 }
 
 async function validateInstagramAccount(message, username) {
     try {
-        const result = await fetchInstagramProfileWithRapidApi(username);
+        const result = await fetchPublicInstagramProfile(username);
 
         if (!result.ok) {
-            console.log(`[RapidAPI][FAIL] Validation impossible pour @${username}. Raison: ${result.reason}`);
-            console.log(`[RapidAPI] Endpoint utilisé: ${result.diagnostics?.endpoint || 'inconnu'}`);
-            console.log(`[RapidAPI] Status HTTP: ${result.diagnostics?.status ?? 'aucun status'}`);
-            console.log(`[RapidAPI] Body complet: ${result.diagnostics?.body ?? 'aucun body'}`);
-            await sendDiscordMessage(message.channel, INSTAGRAM_MANUAL_REVIEW_MESSAGE);
+            console.log(`[Instagram][FAIL] Validation publique impossible pour @${username}.`);
+            await sendDiscordMessage(message.channel, '❌ Vérification Instagram temporairement indisponible. Réessaie plus tard.');
             return;
         }
 
-        console.log(`[RapidAPI][SUCCESS] Profil récupéré via: ${result.profile.source}`);
-
         const validation = validateInstagramProfile(result.profile);
 
-        console.log(`[RapidAPI][${validation.isValid ? 'SUCCESS' : 'FAIL'}] Validation @${username}: ${validation.isValid ? 'valide' : 'non valide'}`);
+        console.log(`[Instagram][${validation.isValid ? 'SUCCESS' : 'FAIL'}] @${username} bio=${result.profile.hasBio} photo=${result.profile.hasProfilePicture} posts=${result.profile.postCount}`);
 
         if (!validation.isValid) {
             await sendDiscordMessage(message.channel, `
 ❌ **Compte Instagram non valide**
 
-${formatMissingItems(validation.missingItems)}.
-
+Il manque :
 ${formatValidationDetails(validation.missingItems)}
-
-Corrige le compte, puis renvoie le lien Instagram ici pour une nouvelle vérification automatique.
         `);
             return;
         }
 
-        await createValidatedVaOpChannel(message, username);
+        await moveValidatedChannel(message, username);
+        await sendDiscordMessage(message.channel, `
+✅ Compte Instagram valide : @${username}
+
+✅ Bio détectée
+✅ Photo de profil détectée
+✅ ${result.profile.postCount} post détecté${result.profile.postCount > 1 ? 's' : ''}
+
+Salon déplacé vers salon privé 2.
+        `);
     } catch (error) {
         console.log('[Instagram] Erreur imprévue pendant la validation.');
         console.log(error?.message || error);
-        await sendDiscordMessage(message.channel, INSTAGRAM_TEMPORARY_ERROR_MESSAGE);
+        await sendDiscordMessage(message.channel, '❌ Vérification Instagram temporairement indisponible. Réessaie plus tard.');
     }
 }
 
