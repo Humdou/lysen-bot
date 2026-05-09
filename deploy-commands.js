@@ -1,61 +1,36 @@
 require('dotenv').config();
 
-const { REST, Routes, SlashCommandBuilder } = require('discord.js');
+const { REST, Routes } = require('discord.js');
+const { getSlashCommands } = require('./src/commands');
+const { CONFIG } = require('./src/config');
 
-const commands = [
+function requireDeployConfig() {
+    if (!process.env.DISCORD_TOKEN) {
+        throw new Error('DISCORD_TOKEN est manquant dans l’environnement.');
+    }
 
-    new SlashCommandBuilder()
-        .setName('start')
-        .setDescription('Commencer l’onboarding'),
-
-    new SlashCommandBuilder()
-        .setName('warmup')
-        .setDescription('Explication du warm-up Instagram'),
-
-    new SlashCommandBuilder()
-        .setName('pay')
-        .setDescription('Informations sur les paiements'),
-
-    new SlashCommandBuilder()
-        .setName('reels')
-        .setDescription('Conseils pour poster des reels'),
-
-    new SlashCommandBuilder()
-        .setName('threads')
-        .setDescription('Conseils et aide Threads'),
-
-    new SlashCommandBuilder()
-        .setName('views')
-        .setDescription('Conseils pour augmenter les vues'),
-
-    new SlashCommandBuilder()
-        .setName('shadowban')
-        .setDescription('Informations sur le shadowban'),
-
-    new SlashCommandBuilder()
-        .setName('help')
-        .setDescription('Afficher toutes les commandes')
-
-].map(command => command.toJSON());
-
-const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
-
-const CLIENT_ID = '1501621868258525275';
-const GUILD_ID = '1485476914218139740';
+    if (!CONFIG.app.clientId || !CONFIG.app.guildId) {
+        throw new Error('DISCORD_CLIENT_ID ou DISCORD_GUILD_ID est manquant.');
+    }
+}
 
 (async () => {
     try {
+        requireDeployConfig();
+
+        const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
+        const commands = getSlashCommands();
 
         console.log('Déploiement des commandes...');
 
         await rest.put(
-            Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID),
+            Routes.applicationGuildCommands(CONFIG.app.clientId, CONFIG.app.guildId),
             { body: commands }
         );
 
         console.log('Commandes déployées.');
-
     } catch (error) {
-        console.error(error);
+        console.error(error?.message || error);
+        process.exitCode = 1;
     }
 })();
