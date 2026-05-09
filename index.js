@@ -163,15 +163,9 @@ function parsePublicInstagramPage(html, username, status) {
         Number.isFinite(fallbackPostCount) ? fallbackPostCount : 0,
         hasVisiblePostMarker ? 1 : 0
     );
-    const profileExists = status === 200 &&
-        !/Sorry, this page isn't available|Page Not Found|Cette page n’est malheureusement pas disponible/i.test(html) &&
-        (
-            canonicalUrl.toLowerCase().includes(`/${lowerUsername}/`) ||
-            ogTitle.toLowerCase().includes(`@${lowerUsername}`) ||
-            searchableHtml.toLowerCase().includes(`"username":"${lowerUsername}"`) ||
-            searchableHtml.toLowerCase().includes(`/${lowerUsername}/`)
-        );
-
+    const notFound = status === 404 ||
+        /Sorry, this page isn't available|Page Not Found|Cette page n’est malheureusement pas disponible/i.test(html);
+    const profileExists = status >= 200 && status < 400 && !notFound;
     const isPrivate = /"is_private"\s*:\s*true/i.test(searchableHtml) ||
         /"isPrivate"\s*:\s*true/i.test(searchableHtml) ||
         /this account is private|ce compte est privé/i.test(searchableHtml);
@@ -254,11 +248,14 @@ async function fetchPublicInstagramProfile(username) {
 
 function validateInstagramProfile(profile) {
     const isValid = profile.profileExists &&
-        !profile.isPrivate &&
-        profile.postCount >= 1;
+        !profile.isPrivate;
+
+    if (isValid && profile.postCount < 1) {
+        console.log('[Instagram] Posts non visibles dans le HTML reçu, validation basée sur profil accessible et non privé.');
+    }
 
     if (isValid && !profile.hasBio && !profile.hasProfilePicture) {
-        console.log('[Instagram] Bio/photo non visibles dans le HTML reçu, validation basée sur profil public + posts détectés.');
+        console.log('[Instagram] Bio/photo non visibles dans le HTML reçu, validation basée sur profil accessible et non privé.');
     }
 
     return {
