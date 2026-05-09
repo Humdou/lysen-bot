@@ -29,6 +29,7 @@ const client = new Client({
 });
 
 const dashboardMessages = new Map();
+const instagramValidationsInProgress = new Set();
 
 // ========================================
 // VALIDATION INSTAGRAM
@@ -116,9 +117,13 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 15000) {
 }
 
 function normalizeInstagramProfile(profile, source) {
+    const biography = profile.biography ||
+        profile.biography_with_entities?.raw_text ||
+        '';
+
     return {
         source,
-        biography: profile.biography || '',
+        biography: stripHtml(biography),
         hasProfilePicture: Boolean(profile.profile_pic_url || profile.profile_pic_url_hd) &&
             profile.has_anonymous_profile_picture !== true
     };
@@ -305,16 +310,7 @@ async function fetchInstagramProfile(username) {
         const webApiResult = await fetchInstagramProfileFromWebApi(username);
 
         if (webApiResult.ok) {
-            const htmlResult = await fetchInstagramProfileFromHtml(username).catch(error => {
-                console.log('[Instagram][html] Fallback HTML échoué après succès API.');
-                console.log(error);
-                return null;
-            });
-
-            return {
-                ok: true,
-                profile: mergeInstagramProfiles(webApiResult.profile, htmlResult?.profile)
-            };
+            return webApiResult;
         }
 
         if (webApiResult.reason === 'not_found') {
@@ -409,24 +405,33 @@ function getInstagramFetchErrorMessage(reason, username) {
 }
 
 async function validateInstagramAccount(message, username) {
-    await message.channel.send('🔎 Analyse automatique du compte Instagram en cours...');
+    const validationKey = `${message.guild.id}:${message.channel.id}`;
 
-    const result = await fetchInstagramProfile(username);
-
-    if (!result.ok) {
-        console.log(`[Instagram] Validation impossible pour @${username}. Raison: ${result.reason}`);
-        await message.channel.send(getInstagramFetchErrorMessage(result.reason, username));
+    if (instagramValidationsInProgress.has(validationKey)) {
+        console.log(`[Instagram] Analyse ignorée pour @${username}: une validation est déjà en cours dans ${message.channel.id}.`);
         return;
     }
 
-    console.log(`[Instagram] Profil récupéré via: ${result.profile.source}`);
+    instagramValidationsInProgress.add(validationKey);
+    await message.channel.send('🔎 Analyse automatique du compte Instagram en cours...');
 
-    const validation = validateInstagramProfile(result.profile);
+    try {
+        const result = await fetchInstagramProfile(username);
 
-    console.log(`[Instagram] Validation @${username}: ${validation.isValid ? 'valide' : 'non valide'}`);
+        if (!result.ok) {
+            console.log(`[Instagram] Validation impossible pour @${username}. Raison: ${result.reason}`);
+            await message.channel.send(getInstagramFetchErrorMessage(result.reason, username));
+            return;
+        }
 
-    if (!validation.isValid) {
-        await message.channel.send(`
+        console.log(`[Instagram] Profil récupéré via: ${result.profile.source}`);
+
+        const validation = validateInstagramProfile(result.profile);
+
+        console.log(`[Instagram] Validation @${username}: ${validation.isValid ? 'valide' : 'non valide'}`);
+
+        if (!validation.isValid) {
+            await message.channel.send(`
 ❌ **Compte Instagram non valide**
 
 ${formatMissingItems(validation.missingItems)}.
@@ -435,12 +440,12 @@ ${formatValidationDetails(validation.missingItems)}
 
 Corrige le compte, puis renvoie le lien Instagram ici pour une nouvelle vérification automatique.
         `);
-        return;
-    }
+            return;
+        }
 
-    const updatedChannel = await message.channel.setName(getValidatedChannelName(username));
+        const updatedChannel = await message.channel.setName(getValidatedChannelName(username));
 
-    await message.channel.send(`
+        await message.channel.send(`
 ✅ **Compte Instagram valide**
 
 Bio présente.
@@ -449,7 +454,10 @@ Photo de profil présente.
 Le salon a été renommé en **${updatedChannel.name}**.
     `);
 
-    await updateDashboard(message.guild);
+        await updateDashboard(message.guild);
+    } finally {
+        instagramValidationsInProgress.delete(validationKey);
+    }
 }
 
 // ========================================
