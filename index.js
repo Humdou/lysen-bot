@@ -111,39 +111,25 @@ function findFirstValue(object, keys) {
 function getRapidApiProfilePayload(data) {
     const firstPost = getRapidApiPosts(data)[0] || null;
 
-    return data?.data?.user ||
-        data?.data ||
-        data?.user ||
-        data?.result?.user ||
-        data?.profile?.user ||
-        data?.owner ||
-        data?.profile ||
-        data?.author ||
-        data?.items?.[0]?.user ||
-        data?.items?.[0]?.owner ||
+    return data?.result?.user ||
+        data?.result?.profile ||
+        data?.result?.owner ||
+        data?.result?.edges?.[0]?.node?.user ||
+        data?.result?.edges?.[0]?.node?.owner ||
+        data?.result?.edges?.[0]?.node?.author ||
         firstPost?.user ||
         firstPost?.owner ||
         firstPost?.author ||
-        data?.result ||
-        data;
+        null;
 }
 
 function getRapidApiPosts(data) {
-    const postCollections = [
-        data?.posts,
-        data?.result,
-        data?.data,
-        data?.items,
-        data?.media,
-        data?.edge_owner_to_timeline_media?.edges
-    ];
+    const edges = data?.result?.edges;
 
-    for (const collection of postCollections) {
-        if (Array.isArray(collection)) {
-            return collection
-                .map(item => item?.node || item)
-                .filter(Boolean);
-        }
+    if (Array.isArray(edges)) {
+        return edges
+            .map(edge => edge?.node)
+            .filter(Boolean);
     }
 
     return [];
@@ -157,7 +143,9 @@ function getRapidApiUsername(data, fallbackUsername) {
         firstPost?.owner?.username ||
         firstPost?.author?.username ||
         firstPost?.caption?.user?.username ||
-        fallbackUsername;
+        data?.result?.username ||
+        data?.result?.user?.username ||
+        '';
 
     return typeof username === 'string' ? username.toLowerCase() : '';
 }
@@ -227,10 +215,9 @@ function hasRapidApiProfileData(profile, data, requestedUsername) {
     const payload = getRapidApiProfilePayload(data);
     const posts = getRapidApiPosts(data);
     const returnedUsername = getRapidApiUsername(data, requestedUsername);
-    const usernameMatches = returnedUsername === requestedUsername.toLowerCase();
 
     return Boolean(payload && typeof payload === 'object') &&
-        usernameMatches &&
+        Boolean(returnedUsername) &&
         posts.length > 0;
 }
 
@@ -349,6 +336,11 @@ async function fetchInstagramProfileWithRapidApi(username) {
                 }
             };
         }
+
+        console.log('[RapidAPI][DEBUG] Object.keys(response):', Object.keys(data || {}));
+        console.log('[RapidAPI][DEBUG] Object.keys(response.result || {}):', Object.keys(data?.result || {}));
+        console.log('[RapidAPI][DEBUG] Object.keys(response.result.edges?.[0] || {}):', Object.keys(data?.result?.edges?.[0] || {}));
+        console.log('[RapidAPI][DEBUG] Object.keys(response.result.edges?.[0]?.node || {}):', Object.keys(data?.result?.edges?.[0]?.node || {}));
 
         const profile = normalizeRapidApiProfile(data);
 
