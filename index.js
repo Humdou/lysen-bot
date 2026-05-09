@@ -109,18 +109,13 @@ function findFirstValue(object, keys) {
 }
 
 function getRapidApiProfilePayload(data) {
-    const firstPost = Array.isArray(data?.result)
-        ? data.result[0]
-        : Array.isArray(data?.data)
-            ? data.data[0]
-            : Array.isArray(data?.posts)
-                ? data.posts[0]
-                : null;
+    const firstPost = getRapidApiPosts(data)[0] || null;
 
     return data?.data?.user ||
         data?.data ||
         data?.user ||
         data?.result?.user ||
+        data?.profile?.user ||
         data?.owner ||
         data?.profile ||
         data?.author ||
@@ -133,8 +128,44 @@ function getRapidApiProfilePayload(data) {
         data;
 }
 
+function getRapidApiPosts(data) {
+    const postCollections = [
+        data?.posts,
+        data?.result,
+        data?.data,
+        data?.items,
+        data?.media,
+        data?.edge_owner_to_timeline_media?.edges
+    ];
+
+    for (const collection of postCollections) {
+        if (Array.isArray(collection)) {
+            return collection
+                .map(item => item?.node || item)
+                .filter(Boolean);
+        }
+    }
+
+    return [];
+}
+
+function getRapidApiUsername(data, fallbackUsername) {
+    const profile = getRapidApiProfilePayload(data);
+    const firstPost = getRapidApiPosts(data)[0] || {};
+    const username = findFirstValue(profile, ['username', 'user_name', 'login']) ||
+        firstPost?.user?.username ||
+        firstPost?.owner?.username ||
+        firstPost?.author?.username ||
+        firstPost?.caption?.user?.username ||
+        fallbackUsername;
+
+    return typeof username === 'string' ? username.toLowerCase() : '';
+}
+
 function normalizeRapidApiProfile(data) {
     const profile = getRapidApiProfilePayload(data);
+    const posts = getRapidApiPosts(data);
+    const firstPost = posts[0] || {};
     const biography = findFirstValue(profile, [
         'biography',
         'bio',
@@ -170,11 +201,15 @@ function normalizeRapidApiProfile(data) {
     ]);
 
     const normalizedBiography = typeof biography === 'object'
-        ? biography.raw_text || biography.text || ''
+        ? biography?.raw_text || biography?.text || ''
         : biography;
     const normalizedProfilePicture = typeof profilePicture === 'object'
-        ? profilePicture.url || profilePicture.uri || profilePicture.src
+        ? profilePicture?.url || profilePicture?.uri || profilePicture?.src
         : profilePicture;
+    const firstCaptionText = firstPost?.caption?.raw_text ||
+        firstPost?.caption?.text ||
+        firstPost?.caption_text ||
+        '';
 
     return {
         source: 'rapidapi',
@@ -182,19 +217,21 @@ function normalizeRapidApiProfile(data) {
         hasProfilePicture: Boolean(normalizedProfilePicture) && anonymousProfilePicture !== true,
         highlightsCount: Array.isArray(highlights)
             ? highlights.length
-            : Number.isFinite(Number(highlights)) ? Number(highlights) : 0
+            : Number.isFinite(Number(highlights)) ? Number(highlights) : 0,
+        postsCount: posts.length,
+        firstCaptionText: stripHtml(String(firstCaptionText || ''))
     };
 }
 
-function hasRapidApiProfileData(profile, data) {
+function hasRapidApiProfileData(profile, data, requestedUsername) {
     const payload = getRapidApiProfilePayload(data);
-    const hasPosts = Array.isArray(data?.result) && data.result.length > 0 ||
-        Array.isArray(data?.data) && data.data.length > 0 ||
-        Array.isArray(data?.posts) && data.posts.length > 0 ||
-        Array.isArray(data?.items) && data.items.length > 0;
+    const posts = getRapidApiPosts(data);
+    const returnedUsername = getRapidApiUsername(data, requestedUsername);
+    const usernameMatches = returnedUsername === requestedUsername.toLowerCase();
 
     return Boolean(payload && typeof payload === 'object') &&
-        (Boolean(profile.biography.trim()) || profile.hasProfilePicture || hasPosts);
+        usernameMatches &&
+        posts.length > 0;
 }
 
 async function fetchInstagramProfileWithRapidApi(username) {
@@ -319,7 +356,10 @@ async function fetchInstagramProfileWithRapidApi(username) {
         console.log(`[RapidAPI] Photo: ${profile.hasProfilePicture}`);
         console.log(`[RapidAPI] Highlights: ${profile.highlightsCount}`);
 
-        if (!hasRapidApiProfileData(profile, data)) {
+        console.log(`[RapidAPI] Posts: ${profile.postsCount}`);
+        console.log(`[RapidAPI] Premier caption présent: ${Boolean(profile.firstCaptionText)}`);
+
+        if (!hasRapidApiProfileData(profile, data, username)) {
             console.log('[RapidAPI][FAIL] Réponse reçue, mais aucune donnée profil exploitable.');
             return {
                 ok: false,
