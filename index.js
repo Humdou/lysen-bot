@@ -5,6 +5,8 @@ const COMPTE_CREE_CATEGORY_ID = '1502120982591045805';
 const DASHBOARD_CHANNEL_NAME = '📊・dashboard';
 const DASHBOARD_UPDATE_INTERVAL_MS = 12 * 60 * 60 * 1000;
 const INSTAGRAM_BASE_URL = 'https://www.instagram.com';
+const VA_ACTIVE_CATEGORY_NAME = 'VA actif 👨‍💼';
+const VA_OP_CATEGORY_NAME = 'VA OP';
 
 const VA_ROLE_ID = '1502068514264055909';
 const COMPTE_CREE_ROLE_ID = '1502084425092169749';
@@ -114,41 +116,143 @@ function extractJsonLd(html) {
 }
 
 function extractJsonStringValue(html, key) {
-    const decodedHtml = decodeHtmlEntities(html)
-        .replace(/\\u0022/g, '"')
-        .replace(/\\"/g, '"')
-        .replace(/\\\//g, '/');
     const pattern = new RegExp(`"${key}"\\s*:\\s*"((?:\\\\.|[^"\\\\])*)"`, 'i');
-    const match = decodedHtml.match(pattern);
+    const match = html.match(pattern) || decodeHtmlEntities(html).match(pattern);
 
     if (!match) return '';
 
     try {
         return JSON.parse(`"${match[1]}"`);
     } catch (error) {
-        return decodeHtmlEntities(match[1].replace(/\\u0026/g, '&'));
+        return decodeHtmlEntities(match[1].replace(/\\u0026/g, '&').replace(/\\\//g, '/'));
+    }
+}
+
+function parseJsonBlock(rawJson) {
+    try {
+        return JSON.parse(decodeHtmlEntities(rawJson));
+    } catch (error) {
+        return null;
+    }
+}
+
+function extractPublicJsonBlocks(html) {
+    const blocks = [];
+    const scriptPattern = /<script\b[^>]*type=["']application\/json["'][^>]*>(.*?)<\/script>/gis;
+    let match;
+
+    while ((match = scriptPattern.exec(html)) !== null) {
+        const parsed = parseJsonBlock(match[1]);
+        if (parsed) blocks.push(parsed);
+    }
+
+    const jsonLd = extractJsonLd(html);
+    if (jsonLd) blocks.push(jsonLd);
+
+    return blocks;
+}
+
+function isDefaultInstagramProfilePicture(value) {
+    const text = String(value || '');
+    return !text ||
+        text.includes('44884218_345707102882519_2446069589734326272_n.jpg') ||
+        text.includes('anonymousUser.jpg');
+}
+
+function rememberBiography(signals, value) {
+    const biography = stripHtml(String(value || ''));
+    if (biography && !signals.biography) {
+        signals.biography = biography;
+    }
+}
+
+function collectInstagramSignals(value, username, signals, parentKey = '', depth = 0) {
+    if (!value || depth > 18) return;
+
+    if (Array.isArray(value)) {
+        if (/edge_owner_to_timeline_media|timeline|media|post/i.test(parentKey) && value.length > 0) {
+            signals.postCount = Math.max(signals.postCount, value.length);
+        }
+
+        for (const item of value) {
+            collectInstagramSignals(item, username, signals, parentKey, depth + 1);
+        }
+
+        return;
+    }
+
+    if (typeof value !== 'object') return;
+
+    for (const [key, childValue] of Object.entries(value)) {
+        const lowerKey = key.toLowerCase();
+        const nextParentKey = parentKey ? `${parentKey}.${lowerKey}` : lowerKey;
+
+        if (['username', 'user_name', 'login'].includes(lowerKey) && String(childValue).toLowerCase() === username) {
+            signals.usernameFound = true;
+        }
+
+        if (['biography', 'bio', 'biography_text'].includes(lowerKey) && typeof childValue === 'string') {
+            rememberBiography(signals, childValue);
+        }
+
+        if (lowerKey === 'raw_text' && /biography|bio/.test(parentKey) && typeof childValue === 'string') {
+            rememberBiography(signals, childValue);
+        }
+
+        if ([
+            'profile_pic_url',
+            'profile_pic_url_hd',
+            'profile_picture',
+            'profilepicture',
+            'avatar',
+            'image'
+        ].includes(lowerKey) && !isDefaultInstagramProfilePicture(childValue)) {
+            signals.profilePicture = String(childValue);
+        }
+
+        if (['media_count', 'posts_count', 'post_count'].includes(lowerKey) && Number.isFinite(Number(childValue))) {
+            signals.postCount = Math.max(signals.postCount, Number(childValue));
+        }
+
+        if (lowerKey === 'count' && /edge_owner_to_timeline_media|timeline_media|posts|media/.test(parentKey) && Number.isFinite(Number(childValue))) {
+            signals.postCount = Math.max(signals.postCount, Number(childValue));
+        }
+
+        if (lowerKey === 'edges' && /edge_owner_to_timeline_media|timeline_media|posts|media/.test(parentKey) && Array.isArray(childValue)) {
+            signals.postCount = Math.max(signals.postCount, childValue.length);
+        }
+
+        collectInstagramSignals(childValue, username, signals, nextParentKey, depth + 1);
     }
 }
 
 function parsePublicInstagramPage(html, username, status) {
-    const jsonLd = extractJsonLd(html);
     const ogDescription = extractMetaContent(html, 'og:description');
     const ogImage = extractMetaContent(html, 'og:image');
     const canonicalUrl = extractMetaContent(html, 'og:url');
     const ogTitle = extractMetaContent(html, 'og:title');
-    const searchableHtml = decodeHtmlEntities(html)
-        .replace(/\\u0022/g, '"')
-        .replace(/\\"/g, '"')
-        .replace(/\\\//g, '/');
-    const rawBiography = extractJsonStringValue(html, 'biography') ||
+    const lowerUsername = username.toLowerCase();
+    const searchableHtml = decodeHtmlEntities(html).replace(/\\\//g, '/');
+    const signals = {
+        usernameFound: false,
+        biography: '',
+        profilePicture: '',
+        postCount: 0
+    };
+
+    for (const jsonBlock of extractPublicJsonBlocks(html)) {
+        collectInstagramSignals(jsonBlock, lowerUsername, signals);
+    }
+
+    const rawBiography = signals.biography ||
+        extractJsonStringValue(html, 'biography') ||
         extractJsonStringValue(html, 'bio') ||
         searchableHtml.match(/"biography_with_entities"\s*:\s*\{[^}]*"raw_text"\s*:\s*"((?:\\.|[^"\\])*)"/i)?.[1] ||
-        jsonLd?.description ||
         '';
-    const rawProfilePicture = extractJsonStringValue(html, 'profile_pic_url_hd') ||
+    const rawProfilePicture = signals.profilePicture ||
+        extractJsonStringValue(html, 'profile_pic_url_hd') ||
         extractJsonStringValue(html, 'profile_pic_url') ||
         extractJsonStringValue(html, 'profile_picture') ||
-        jsonLd?.image ||
         ogImage ||
         '';
     const mediaCountMatch = searchableHtml.match(/"edge_owner_to_timeline_media"\s*:\s*\{\s*"count"\s*:\s*(\d+)/) ||
@@ -156,23 +260,26 @@ function parsePublicInstagramPage(html, username, status) {
         searchableHtml.match(/"posts_count"\s*:\s*(\d+)/) ||
         ogDescription.match(/([\d,.]+)\s+(?:posts?|publications?)/i);
     const biography = stripHtml(rawBiography);
-    const postCount = mediaCountMatch ? Number(String(mediaCountMatch[1]).replace(/[,.]/g, '')) : 0;
-    const lowerUsername = username.toLowerCase();
+    const fallbackPostCount = mediaCountMatch ? Number(String(mediaCountMatch[1]).replace(/[,.]/g, '')) : 0;
+    const postCount = Math.max(signals.postCount, Number.isFinite(fallbackPostCount) ? fallbackPostCount : 0);
     const profileExists = status === 200 &&
         !/Sorry, this page isn't available|Page Not Found|Cette page n’est malheureusement pas disponible/i.test(html) &&
         (
+            signals.usernameFound ||
             canonicalUrl.toLowerCase().includes(`/${lowerUsername}/`) ||
             ogTitle.toLowerCase().includes(`@${lowerUsername}`) ||
             searchableHtml.toLowerCase().includes(`"username":"${lowerUsername}"`) ||
             searchableHtml.toLowerCase().includes(`/${lowerUsername}/`)
         );
 
+    console.log(`[Instagram] Signaux: profil=${profileExists} username=${signals.usernameFound} bio=${Boolean(biography)} photo=${!isDefaultInstagramProfilePicture(rawProfilePicture)} posts=${postCount}`);
+
     return {
         username,
         profileExists,
         biography,
         hasBio: Boolean(biography.trim()),
-        hasProfilePicture: Boolean(rawProfilePicture) && !String(rawProfilePicture).includes('44884218_345707102882519_2446069589734326272_n.jpg'),
+        hasProfilePicture: !isDefaultInstagramProfilePicture(rawProfilePicture),
         postCount: Number.isFinite(postCount) ? postCount : 0
     };
 }
@@ -260,6 +367,22 @@ function getValidatedChannelName(instagramUsername) {
     return `cpt-${safeUsername || 'va'}-✅`;
 }
 
+async function getCategoryByNameOrId(guild, categoryName, fallbackId) {
+    await guild.channels.fetch();
+
+    const categoryByName = guild.channels.cache.find(channel =>
+        channel.type === ChannelType.GuildCategory &&
+        channel.name === categoryName
+    );
+
+    if (categoryByName) return categoryByName;
+
+    const categoryById = guild.channels.cache.get(fallbackId);
+    if (categoryById?.type === ChannelType.GuildCategory) return categoryById;
+
+    throw new Error(`Catégorie Discord introuvable: ${categoryName}`);
+}
+
 async function sendDiscordMessage(channel, content) {
     try {
         await channel.send(content);
@@ -271,12 +394,17 @@ async function sendDiscordMessage(channel, content) {
 
 async function createInstagramWorkflowChannel(message, username) {
     const finalChannelName = getValidatedChannelName(username);
+    const vaOpCategory = await getCategoryByNameOrId(
+        message.guild,
+        VA_OP_CATEGORY_NAME,
+        COMPTE_CREE_CATEGORY_ID
+    );
 
     await message.guild.channels.fetch();
 
     const existingFinalChannel = message.guild.channels.cache.find(channel =>
         channel.type === ChannelType.GuildText &&
-        channel.parentId === COMPTE_CREE_CATEGORY_ID &&
+        channel.parentId === vaOpCategory.id &&
         channel.topic === message.author.id
     );
 
@@ -299,7 +427,7 @@ async function createInstagramWorkflowChannel(message, username) {
     const finalChannel = await message.guild.channels.create({
         name: finalChannelName,
         type: ChannelType.GuildText,
-        parent: COMPTE_CREE_CATEGORY_ID,
+        parent: vaOpCategory.id,
         topic: message.author.id,
         permissionOverwrites: [
             {
