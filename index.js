@@ -5,6 +5,7 @@ const COMPTE_CREE_CATEGORY_ID = '1502120982591045805';
 const DASHBOARD_CHANNEL_NAME = '📊・dashboard';
 const DASHBOARD_UPDATE_INTERVAL_MS = 12 * 60 * 60 * 1000;
 const INSTAGRAM_WEB_PROFILE_URL = 'https://www.instagram.com/api/v1/users/web_profile_info/';
+const INSTAGRAM_PROFILE_PAGE_URL = 'https://www.instagram.com/';
 const INSTAGRAM_REQUIRED_HIGHLIGHTS = 2;
 
 const VA_ROLE_ID = '1502068514264055909';
@@ -54,73 +55,344 @@ function buildInstagramProfileUrl(username) {
     return url;
 }
 
-async function fetchInstagramProfile(username) {
+function buildInstagramProfilePageUrl(username) {
+    return `${INSTAGRAM_PROFILE_PAGE_URL}${username}/`;
+}
+
+function getInstagramCookieHeader() {
+    if (process.env.INSTAGRAM_COOKIE) {
+        return process.env.INSTAGRAM_COOKIE;
+    }
+
+    if (process.env.INSTAGRAM_SESSION_ID) {
+        return `sessionid=${process.env.INSTAGRAM_SESSION_ID}`;
+    }
+
+    return null;
+}
+
+function getInstagramCsrfToken(cookieHeader) {
+    if (!cookieHeader) return null;
+
+    const csrfMatch = cookieHeader.match(/(?:^|;\s*)csrftoken=([^;]+)/);
+    return csrfMatch ? csrfMatch[1] : null;
+}
+
+function getInstagramHeaders({ accept = 'application/json', referer = INSTAGRAM_PROFILE_PAGE_URL } = {}) {
+    const cookieHeader = getInstagramCookieHeader();
+    const csrfToken = getInstagramCsrfToken(cookieHeader);
+    const headers = {
+        accept,
+        'accept-language': 'fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7',
+        referer,
+        'sec-fetch-dest': accept.includes('html') ? 'document' : 'empty',
+        'sec-fetch-mode': accept.includes('html') ? 'navigate' : 'cors',
+        'sec-fetch-site': 'same-origin',
+        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+        'x-asbd-id': '129477',
+        'x-ig-app-id': '936619743392459',
+        'x-requested-with': 'XMLHttpRequest'
+    };
+
+    if (cookieHeader) {
+        headers.cookie = cookieHeader;
+        console.log('[Instagram] Cookie fournie via variable d’environnement.');
+    }
+
+    if (csrfToken) {
+        headers['x-csrftoken'] = csrfToken;
+    }
+
+    return headers;
+}
+
+function decodeHtmlEntities(value = '') {
+    return value
+        .replace(/&quot;/g, '"')
+        .replace(/&#x27;/g, "'")
+        .replace(/&#39;/g, "'")
+        .replace(/&amp;/g, '&')
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>');
+}
+
+function stripHtml(value = '') {
+    return decodeHtmlEntities(value.replace(/<[^>]*>/g, '')).trim();
+}
+
+function getTextBetween(text, start, end) {
+    const startIndex = text.indexOf(start);
+
+    if (startIndex === -1) return null;
+
+    const contentStart = startIndex + start.length;
+    const endIndex = text.indexOf(end, contentStart);
+
+    if (endIndex === -1) return null;
+
+    return text.slice(contentStart, endIndex);
+}
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = 15000) {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 15000);
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
-        // Endpoint web public utilisé par Instagram pour charger les infos visibles du profil.
-        // Aucun navigateur headless n'est nécessaire, ce qui reste léger et compatible Render.
-        const response = await fetch(buildInstagramProfileUrl(username), {
+        return await fetch(url, {
+            ...options,
             signal: controller.signal,
-            headers: {
-                'accept': 'application/json',
-                'accept-language': 'fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7',
-                'sec-fetch-dest': 'empty',
-                'sec-fetch-mode': 'cors',
-                'sec-fetch-site': 'same-origin',
-                'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
-                'x-ig-app-id': '936619743392459'
-            }
+            headers: options.headers || {}
         });
+    } finally {
+        clearTimeout(timeout);
+    }
+}
 
-        if (response.status === 404) {
+function normalizeInstagramProfile(profile, source) {
+    return {
+        source,
+        biography: profile.biography || '',
+        highlightCount: typeof profile.highlight_reel_count === 'number'
+            ? profile.highlight_reel_count
+            : null,
+        hasProfilePicture: Boolean(profile.profile_pic_url || profile.profile_pic_url_hd) &&
+            profile.has_anonymous_profile_picture !== true
+    };
+}
+
+async function fetchInstagramProfileFromWebApi(username) {
+    const url = buildInstagramProfileUrl(username);
+
+    console.log(`[Instagram][web_api] Requête: ${url.toString()}`);
+
+    const response = await fetchWithTimeout(url, {
+        headers: getInstagramHeaders({
+            accept: 'application/json',
+            referer: buildInstagramProfilePageUrl(username)
+        })
+    });
+
+    const contentType = response.headers.get('content-type') || 'unknown';
+    const body = await response.text();
+
+    console.log(`[Instagram][web_api] Status: ${response.status}`);
+    console.log(`[Instagram][web_api] Content-Type: ${contentType}`);
+    console.log(`[Instagram][web_api] Taille réponse: ${body.length} caractères`);
+
+    if (response.status === 404) {
+        return {
+            ok: false,
+            reason: 'not_found'
+        };
+    }
+
+    if (response.status === 401 || response.status === 403 || response.status === 429) {
+        console.log(`[Instagram][web_api] Accès limité ou bloqué par Instagram. Extrait: ${body.slice(0, 180)}`);
+        return {
+            ok: false,
+            reason: 'blocked'
+        };
+    }
+
+    if (!response.ok) {
+        console.log(`[Instagram][web_api] Réponse non OK. Extrait: ${body.slice(0, 180)}`);
+        return {
+            ok: false,
+            reason: 'instagram_unavailable'
+        };
+    }
+
+    let data;
+
+    try {
+        data = JSON.parse(body);
+    } catch (error) {
+        console.log('[Instagram][web_api] JSON invalide.');
+        console.log(`[Instagram][web_api] Extrait: ${body.slice(0, 180)}`);
+        return {
+            ok: false,
+            reason: 'invalid_json'
+        };
+    }
+
+    const profile = data?.data?.user;
+
+    if (!profile) {
+        console.log('[Instagram][web_api] Champ data.user absent.');
+        return {
+            ok: false,
+            reason: 'profile_missing'
+        };
+    }
+
+    const normalizedProfile = normalizeInstagramProfile(profile, 'web_api');
+
+    console.log(`[Instagram][web_api] Bio: ${Boolean(normalizedProfile.biography.trim())}`);
+    console.log(`[Instagram][web_api] Photo: ${normalizedProfile.hasProfilePicture}`);
+    console.log(`[Instagram][web_api] Highlights: ${normalizedProfile.highlightCount}`);
+
+    return {
+        ok: true,
+        profile: normalizedProfile
+    };
+}
+
+function parseInstagramProfileFromHtml(html) {
+    const ldJsonRaw = getTextBetween(html, '<script type="application/ld+json">', '</script>');
+    const ogDescriptionMatch = html.match(/<meta\s+property="og:description"\s+content="([^"]*)"/i);
+    const ogImageMatch = html.match(/<meta\s+property="og:image"\s+content="([^"]*)"/i);
+    let biography = '';
+    let hasProfilePicture = false;
+
+    if (ldJsonRaw) {
+        try {
+            const ldJson = JSON.parse(decodeHtmlEntities(ldJsonRaw));
+            biography = stripHtml(ldJson.description || '');
+            hasProfilePicture = Boolean(ldJson.image);
+        } catch (error) {
+            console.log('[Instagram][html] JSON-LD invalide, fallback sur meta tags.');
+        }
+    }
+
+    if (!biography && ogDescriptionMatch?.[1]) {
+        const description = decodeHtmlEntities(ogDescriptionMatch[1]);
+        const bioCandidate = description.split(' - ')[1] || description;
+        biography = stripHtml(bioCandidate.replace(/^See Instagram photos and videos from\s+/i, ''));
+    }
+
+    if (!hasProfilePicture && ogImageMatch?.[1]) {
+        hasProfilePicture = Boolean(decodeHtmlEntities(ogImageMatch[1]).trim());
+    }
+
+    return {
+        source: 'html',
+        biography,
+        hasProfilePicture,
+        highlightCount: null
+    };
+}
+
+async function fetchInstagramProfileFromHtml(username) {
+    const url = buildInstagramProfilePageUrl(username);
+
+    console.log(`[Instagram][html] Requête: ${url}`);
+
+    const response = await fetchWithTimeout(url, {
+        headers: getInstagramHeaders({
+            accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            referer: INSTAGRAM_PROFILE_PAGE_URL
+        })
+    });
+
+    const contentType = response.headers.get('content-type') || 'unknown';
+    const body = await response.text();
+
+    console.log(`[Instagram][html] Status: ${response.status}`);
+    console.log(`[Instagram][html] Content-Type: ${contentType}`);
+    console.log(`[Instagram][html] Taille réponse: ${body.length} caractères`);
+
+    if (response.status === 404) {
+        return {
+            ok: false,
+            reason: 'not_found'
+        };
+    }
+
+    if (!response.ok) {
+        console.log(`[Instagram][html] Réponse non OK. Extrait: ${body.slice(0, 180)}`);
+        return {
+            ok: false,
+            reason: 'instagram_unavailable'
+        };
+    }
+
+    const profile = parseInstagramProfileFromHtml(body);
+
+    console.log(`[Instagram][html] Bio: ${Boolean(profile.biography.trim())}`);
+    console.log(`[Instagram][html] Photo: ${profile.hasProfilePicture}`);
+    console.log('[Instagram][html] Highlights: indisponible dans le HTML public.');
+
+    if (!profile.biography && !profile.hasProfilePicture) {
+        return {
+            ok: false,
+            reason: 'profile_missing'
+        };
+    }
+
+    return {
+        ok: true,
+        profile
+    };
+}
+
+function mergeInstagramProfiles(primaryProfile, fallbackProfile) {
+    if (!fallbackProfile) return primaryProfile;
+
+    return {
+        source: `${primaryProfile.source}+${fallbackProfile.source}`,
+        biography: primaryProfile.biography || fallbackProfile.biography || '',
+        hasProfilePicture: primaryProfile.hasProfilePicture || fallbackProfile.hasProfilePicture,
+        highlightCount: primaryProfile.highlightCount ?? fallbackProfile.highlightCount
+    };
+}
+
+async function fetchInstagramProfile(username) {
+    console.log('====================');
+    console.log(`[Instagram] Analyse du profil @${username}`);
+    console.log(`[Instagram] Auth optionnelle: ${getInstagramCookieHeader() ? 'cookie/session configurée' : 'aucune cookie/session'}`);
+    console.log('====================');
+
+    try {
+        const webApiResult = await fetchInstagramProfileFromWebApi(username);
+
+        if (webApiResult.ok) {
+            const htmlResult = await fetchInstagramProfileFromHtml(username).catch(error => {
+                console.log('[Instagram][html] Fallback HTML échoué après succès API.');
+                console.log(error);
+                return null;
+            });
+
+            return {
+                ok: true,
+                profile: mergeInstagramProfiles(webApiResult.profile, htmlResult?.profile)
+            };
+        }
+
+        if (webApiResult.reason === 'not_found') {
             return {
                 ok: false,
                 reason: 'not_found'
             };
         }
 
-        if (!response.ok) {
-            return {
-                ok: false,
-                reason: 'instagram_unavailable'
-            };
-        }
+        console.log(`[Instagram] API web indisponible (${webApiResult.reason}), tentative fallback HTML.`);
 
-        const data = await response.json();
-        const profile = data?.data?.user;
+        const htmlResult = await fetchInstagramProfileFromHtml(username);
 
-        if (!profile) {
-            return {
-                ok: false,
-                reason: 'instagram_unavailable'
-            };
+        if (htmlResult.ok) {
+            return htmlResult;
         }
 
         return {
-            ok: true,
-            profile
+            ok: false,
+            reason: htmlResult.reason === 'not_found' ? 'not_found' : webApiResult.reason
         };
     } catch (error) {
-        console.log('❌ Erreur analyse Instagram');
+        console.log('[Instagram] Erreur globale pendant la récupération.');
         console.log(error);
 
         return {
             ok: false,
             reason: 'instagram_unavailable'
         };
-    } finally {
-        clearTimeout(timeout);
     }
 }
 
 function validateInstagramProfile(profile) {
     const missingItems = [];
     const biography = profile.biography || '';
-    const highlightCount = Number(profile.highlight_reel_count || 0);
-    const hasProfilePicture = Boolean(profile.profile_pic_url || profile.profile_pic_url_hd) &&
-        profile.has_anonymous_profile_picture !== true;
+    const highlightCount = typeof profile.highlightCount === 'number' ? profile.highlightCount : null;
+    const hasProfilePicture = profile.hasProfilePicture === true;
 
     if (!biography.trim()) {
         missingItems.push({
@@ -136,7 +408,12 @@ function validateInstagramProfile(profile) {
         });
     }
 
-    if (highlightCount !== INSTAGRAM_REQUIRED_HIGHLIGHTS) {
+    if (highlightCount === null) {
+        missingItems.push({
+            summary: 'le nombre de highlights n’a pas pu être vérifié',
+            details: 'Instagram n’a pas renvoyé le compteur de highlights. Configure INSTAGRAM_COOKIE ou INSTAGRAM_SESSION_ID sur Render pour fiabiliser cette vérification.'
+        });
+    } else if (highlightCount !== INSTAGRAM_REQUIRED_HIGHLIGHTS) {
         const missingHighlightCount = Math.max(INSTAGRAM_REQUIRED_HIGHLIGHTS - highlightCount, 0);
         const extraHighlightCount = Math.max(highlightCount - INSTAGRAM_REQUIRED_HIGHLIGHTS, 0);
 
@@ -179,21 +456,34 @@ function getValidatedChannelName(username) {
     return `cpt-${safeUsername || 'instagram'}-✅`;
 }
 
+function getInstagramFetchErrorMessage(reason, username) {
+    if (reason === 'not_found') {
+        return `❌ Impossible de trouver le compte Instagram **@${username}**. Vérifie le lien puis renvoie-le ici.`;
+    }
+
+    if (reason === 'blocked') {
+        return '❌ Instagram bloque temporairement la récupération du profil depuis le serveur. Réessaie dans quelques minutes. Si ça revient souvent, configure `INSTAGRAM_COOKIE` ou `INSTAGRAM_SESSION_ID` sur Render.';
+    }
+
+    return '❌ Impossible d’analyser le compte Instagram pour le moment. Réessaie en renvoyant le lien dans quelques minutes.';
+}
+
 async function validateInstagramAccount(message, username) {
     await message.channel.send('🔎 Analyse automatique du compte Instagram en cours...');
 
     const result = await fetchInstagramProfile(username);
 
     if (!result.ok) {
-        const errorMessage = result.reason === 'not_found'
-            ? `❌ Impossible de trouver le compte Instagram **@${username}**. Vérifie le lien puis renvoie-le ici.`
-            : '❌ Impossible d’analyser le compte Instagram pour le moment. Réessaie en renvoyant le lien dans quelques minutes.';
-
-        await message.channel.send(errorMessage);
+        console.log(`[Instagram] Validation impossible pour @${username}. Raison: ${result.reason}`);
+        await message.channel.send(getInstagramFetchErrorMessage(result.reason, username));
         return;
     }
 
+    console.log(`[Instagram] Profil récupéré via: ${result.profile.source}`);
+
     const validation = validateInstagramProfile(result.profile);
+
+    console.log(`[Instagram] Validation @${username}: ${validation.isValid ? 'valide' : 'non valide'}`);
 
     if (!validation.isValid) {
         await message.channel.send(`
