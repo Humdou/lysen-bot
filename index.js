@@ -281,6 +281,14 @@ function parsePublicInstagramPage(html, username, status) {
         searchableHtml.match(/"posts_count"\s*:\s*(\d+)/) ||
         ogDescription.match(/([\d,.]+)\s+(?:posts?|publications?)/i);
     const biography = stripHtml(rawBiography);
+    const hasBioSignal = Boolean(biography.trim()) ||
+        /"biography"\s*:\s*"(?!")/i.test(searchableHtml) ||
+        /"bio"\s*:\s*"(?!")/i.test(searchableHtml) ||
+        /"biography_with_entities"\s*:\s*\{[^}]*"raw_text"\s*:\s*"(?!")/i.test(searchableHtml);
+    const hasPhotoSignal = Boolean(rawProfilePicture) ||
+        /"profile_pic_url(?:_hd)?"\s*:\s*"https?:\/\//i.test(searchableHtml) ||
+        /"profile_picture"\s*:\s*"https?:\/\//i.test(searchableHtml) ||
+        /<meta[^>]+property=["']og:image["'][^>]+content=["']https?:\/\/[^"']+["']/i.test(html);
     const hasVisiblePostMarker = /<meta[^>]+property=["']og:image["'][^>]+content=["'][^"']+instagram[^"']+["']/i.test(html) ||
         /"shortcode"\s*:\s*"[^"]+"/i.test(searchableHtml) ||
         /"display_url"\s*:\s*"[^"]+"/i.test(searchableHtml);
@@ -300,15 +308,19 @@ function parsePublicInstagramPage(html, username, status) {
             searchableHtml.toLowerCase().includes(`/${lowerUsername}/`)
         );
 
-    const hasProfilePicture = profileExists && !isDefaultInstagramProfilePicture(rawProfilePicture);
+    const isPrivate = /"is_private"\s*:\s*true/i.test(searchableHtml) ||
+        /"isPrivate"\s*:\s*true/i.test(searchableHtml) ||
+        /this account is private|ce compte est privé/i.test(searchableHtml);
+    const hasProfilePicture = profileExists && hasPhotoSignal && !isDefaultInstagramProfilePicture(rawProfilePicture);
 
-    console.log(`[Instagram] Signaux: profil=${profileExists} username=${signals.usernameFound} bio=${Boolean(biography)} photo=${hasProfilePicture} posts=${postCount}`);
+    console.log(`[Instagram] Signaux: profil=${profileExists} privé=${isPrivate} username=${signals.usernameFound} bio=${hasBioSignal} photo=${hasProfilePicture} posts=${postCount}`);
 
     return {
         username,
         profileExists,
+        isPrivate,
         biography,
-        hasBio: Boolean(biography.trim()),
+        hasBio: profileExists && hasBioSignal,
         hasProfilePicture,
         postCount: Number.isFinite(postCount) ? postCount : 0
     };
@@ -358,27 +370,13 @@ async function fetchPublicInstagramProfile(username) {
 }
 
 function validateInstagramProfile(profile) {
-    const missingItems = [];
-
-    if (!profile.profileExists) {
-        missingItems.push('profil introuvable');
-    }
-
-    if (!profile.hasBio) {
-        missingItems.push('bio');
-    }
-
-    if (!profile.hasProfilePicture) {
-        missingItems.push('photo de profil');
-    }
-
-    if (profile.postCount < 1) {
-        missingItems.push('au moins 1 post');
-    }
+    const isValid = profile.profileExists &&
+        !profile.isPrivate &&
+        profile.postCount >= 1 &&
+        (profile.hasBio || profile.hasProfilePicture);
 
     return {
-        isValid: missingItems.length === 0,
-        missingItems
+        isValid
     };
 }
 
@@ -572,8 +570,12 @@ async function validateInstagramAccount(channel, username, discordUsername) {
             await sendDiscordMessage(channel, `
 ❌ **Compte Instagram non valide**
 
-Il manque :
-${formatValidationDetails(validation.missingItems)}
+Le compte doit être :
+• public
+• avec au moins 1 post
+• avec une bio ou une photo de profil
+
+Corrige le compte puis renvoie le lien.
         `);
             return;
         }
@@ -587,10 +589,7 @@ ${formatValidationDetails(validation.missingItems)}
         await sendDiscordMessage(channel, `
 ✅ Compte Instagram valide
 
-Le compte respecte toutes les conditions :
-• bio
-• photo de profil
-• au moins 1 post
+Le compte respecte les conditions demandées.
 
 Le salon a été validé automatiquement.
         `);
