@@ -1,18 +1,15 @@
 require('dotenv').config();
 
 const {
-    ChannelType,
     Client,
-    EmbedBuilder,
-    GatewayIntentBits,
-    PermissionsBitField
+    GatewayIntentBits
 } = require('discord.js');
 
 const { COMMAND_RESPONSES, getSlashCommands } = require('./src/commands');
 const { CONFIG } = require('./src/config');
+const { createDashboardService } = require('./src/dashboard');
 const {
     createPrivateWorkflowChannel,
-    fetchGuildChannels,
     findUserWorkflowChannel,
     getVaActiveCategory,
     getVaChannelName,
@@ -25,6 +22,7 @@ const {
     updateMemberRoles
 } = require('./src/discord-utils');
 const { extractInstagramProfile } = require('./src/instagram-link');
+const { createStore } = require('./src/metrics-store');
 const { getOnboardingMessage, getVaOpMessage } = require('./src/messages');
 
 const client = new Client({
@@ -36,11 +34,11 @@ const client = new Client({
     ]
 });
 
-const dashboardMessages = new Map();
 const startLocks = new Set();
 const vaOpTransitionLocks = new Set();
 const processedInstagramMessages = new Set();
-let dashboardUpdateInProgress = false;
+const metricsStore = createStore();
+const dashboardService = createDashboardService(client, metricsStore);
 
 function requireDiscordToken() {
     if (!process.env.DISCORD_TOKEN) {
@@ -107,7 +105,8 @@ async function startOnboarding(interaction) {
         );
 
         await sendAndPin(channel, getOnboardingMessage(), 'onboarding');
-        await updateDashboard(interaction.guild);
+        await metricsStore.recordOnboardingStart();
+        await dashboardService.updateGuildDashboard(interaction.guild);
 
         return replySafely(interaction, {
             content: `✅ Ton salon privé a été créé : ${channel}`
@@ -141,11 +140,16 @@ async function moveUserToVaOp(message, instagramProfile) {
             vaOpCategory
         );
 
+        if (!existingFinalChannel) {
+            await metricsStore.recordVaOpChannelCreated();
+        }
+
         if (finalChannel.name !== finalChannelName) {
             await finalChannel.setName(finalChannelName);
         }
 
         const member = await message.guild.members.fetch(message.author.id);
+        const wasAlreadyVaOp = member.roles.cache.has(CONFIG.roles.vaOp);
 
         await updateMemberRoles(member, {
             add: [CONFIG.roles.vaOp],
@@ -154,176 +158,19 @@ async function moveUserToVaOp(message, instagramProfile) {
 
         await ensureVaOpMessage(finalChannel, instagramProfile);
 
+        if (!wasAlreadyVaOp || !existingFinalChannel) {
+            await metricsStore.recordCompletedOnboarding();
+        }
+
         if (message.channel.id !== finalChannel.id) {
             await safeDeleteChannel(message.channel, 'VA ACTIF');
         }
 
-        await updateDashboard(message.guild);
+        await dashboardService.updateGuildDashboard(message.guild);
 
         console.log(`[Workflow] ${message.author.id} déplacé en VA OP avec @${instagramProfile.username}.`);
     } finally {
         vaOpTransitionLocks.delete(workflowKey);
-    }
-}
-
-async function getDashboardChannel(guild) {
-    const channels = await fetchGuildChannels(guild);
-    const existingChannel = channels.find(channel =>
-        channel.type === ChannelType.GuildText &&
-        channel.name === CONFIG.guild.dashboardChannelName
-    );
-
-    if (existingChannel) return existingChannel;
-
-    return guild.channels.create({
-        name: CONFIG.guild.dashboardChannelName,
-        type: ChannelType.GuildText,
-        permissionOverwrites: [
-            {
-                id: guild.id,
-                allow: [
-                    PermissionsBitField.Flags.ViewChannel,
-                    PermissionsBitField.Flags.ReadMessageHistory
-                ],
-                deny: [PermissionsBitField.Flags.SendMessages]
-            },
-            {
-                id: client.user.id,
-                allow: [
-                    PermissionsBitField.Flags.ViewChannel,
-                    PermissionsBitField.Flags.SendMessages,
-                    PermissionsBitField.Flags.ReadMessageHistory,
-                    PermissionsBitField.Flags.ManageMessages
-                ]
-            },
-            {
-                id: CONFIG.roles.manager,
-                allow: [
-                    PermissionsBitField.Flags.ViewChannel,
-                    PermissionsBitField.Flags.ReadMessageHistory
-                ]
-            }
-        ]
-    });
-}
-
-async function getDashboardStats(guild) {
-    await guild.members.fetch();
-    await fetchGuildChannels(guild);
-
-    const vaActiveRole = await guild.roles.fetch(CONFIG.roles.vaActive).catch(() => null);
-    const vaOpRole = await guild.roles.fetch(CONFIG.roles.vaOp).catch(() => null);
-    const vaActiveCategory = await getVaActiveCategory(guild).catch(() => null);
-    const vaOpCategory = await getVaOpCategory(guild).catch(() => null);
-    const workflowCategoryIds = [
-        vaActiveCategory?.id || CONFIG.guild.vaActiveCategoryId,
-        vaOpCategory?.id || CONFIG.guild.vaOpCategoryId
-    ];
-
-    const openChannelsCount = guild.channels.cache.filter(channel =>
-        channel.type === ChannelType.GuildText &&
-        workflowCategoryIds.includes(channel.parentId)
-    ).size;
-
-    return {
-        activeVaCount: vaActiveRole ? vaActiveRole.members.size : 0,
-        vaOpCount: vaOpRole ? vaOpRole.members.size : 0,
-        openChannelsCount
-    };
-}
-
-function buildDashboardEmbed(guild, stats) {
-    return new EmbedBuilder()
-        .setColor(0x2ECC71)
-        .setTitle('📊 Dashboard Lysen Agency')
-        .setDescription('Statut actuel du bot et de l’activité VA.')
-        .addFields(
-            {
-                name: '👥 VA actifs',
-                value: `${stats.activeVaCount}`,
-                inline: true
-            },
-            {
-                name: '🫡 VA OP',
-                value: `${stats.vaOpCount}`,
-                inline: true
-            },
-            {
-                name: '🔓 Salons ouverts',
-                value: `${stats.openChannelsCount}`,
-                inline: true
-            },
-            {
-                name: '🤖 Statut du bot',
-                value: '🟢 ONLINE',
-                inline: true
-            }
-        )
-        .setFooter({ text: guild.name })
-        .setTimestamp();
-}
-
-async function getDashboardMessage(channel) {
-    const cachedMessageId = dashboardMessages.get(channel.guild.id);
-
-    if (cachedMessageId) {
-        const cachedMessage = await channel.messages.fetch(cachedMessageId).catch(() => null);
-        if (cachedMessage) return cachedMessage;
-    }
-
-    const messages = await channel.messages.fetch({ limit: 100 });
-    const botMessages = messages
-        .filter(message => message.author.id === client.user.id)
-        .sort((first, second) => second.createdTimestamp - first.createdTimestamp);
-
-    const dashboardMessage = botMessages.first() || null;
-    const duplicateMessages = botMessages.filter(message => message.id !== dashboardMessage?.id);
-
-    for (const duplicateMessage of duplicateMessages.values()) {
-        await duplicateMessage.delete().catch(() => null);
-    }
-
-    if (dashboardMessage) {
-        dashboardMessages.set(channel.guild.id, dashboardMessage.id);
-    }
-
-    return dashboardMessage;
-}
-
-async function updateDashboard(guild) {
-    try {
-        const channel = await getDashboardChannel(guild);
-        const stats = await getDashboardStats(guild);
-        const embed = buildDashboardEmbed(guild, stats);
-        const dashboardMessage = await getDashboardMessage(channel);
-
-        if (dashboardMessage) {
-            await dashboardMessage.edit({ content: '', embeds: [embed] });
-            return;
-        }
-
-        const sentMessage = await channel.send({ embeds: [embed] });
-        dashboardMessages.set(guild.id, sentMessage.id);
-    } catch (error) {
-        console.log('❌ Erreur dashboard');
-        console.log(error?.message || error);
-    }
-}
-
-async function updateAllDashboards() {
-    if (dashboardUpdateInProgress) {
-        console.log('[Dashboard] Mise à jour déjà en cours, cycle ignoré.');
-        return;
-    }
-
-    dashboardUpdateInProgress = true;
-
-    try {
-        for (const guild of client.guilds.cache.values()) {
-            await updateDashboard(guild);
-        }
-    } finally {
-        dashboardUpdateInProgress = false;
     }
 }
 
@@ -342,6 +189,7 @@ async function handleSlashCommand(interaction) {
             await interaction.deferReply({ ephemeral: true });
         }
 
+        await metricsStore.recordCommand(interaction.commandName, interaction.user.id);
         await startOnboarding(interaction);
         return;
     }
@@ -360,6 +208,8 @@ async function handleSlashCommand(interaction) {
         content: response,
         ephemeral: true
     });
+
+    await metricsStore.recordCommand(interaction.commandName, interaction.user.id);
 }
 
 async function handleInstagramMessage(message) {
@@ -378,6 +228,7 @@ async function handleInstagramMessage(message) {
 
     processedInstagramMessages.add(message.id);
     setTimeout(() => processedInstagramMessages.delete(message.id), 10 * 60 * 1000);
+    await metricsStore.recordInstagramSubmission();
 
     console.log('====================');
     console.log(`[Workflow] Lien Instagram détecté: @${instagramProfile.username}`);
@@ -405,6 +256,7 @@ function installProcessGuards() {
 async function bootstrap() {
     installProcessGuards();
     requireDiscordToken();
+    await metricsStore.load();
     await client.login(process.env.DISCORD_TOKEN);
 }
 
@@ -416,9 +268,9 @@ client.once('ready', async () => {
         console.log(error?.message || error);
     });
 
-    await updateAllDashboards();
+    await dashboardService.updateAllDashboards();
     setInterval(() => {
-        updateAllDashboards().catch(error => {
+        dashboardService.updateAllDashboards().catch(error => {
             console.log('[Dashboard] Erreur intervalle.');
             console.log(error?.message || error);
         });
