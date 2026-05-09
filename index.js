@@ -30,6 +30,7 @@ const client = new Client({
 
 const dashboardMessages = new Map();
 const instagramValidationsInProgress = new Set();
+const processedInstagramMessages = new Set();
 
 // ========================================
 // VALIDATION INSTAGRAM
@@ -343,6 +344,45 @@ async function fetchInstagramProfile(username) {
     }
 }
 
+async function moveVaToVaOp(message) {
+    const member = await message.guild.members.fetch(message.author.id);
+
+    // Le salon passe en VA OP avant l'analyse afin que le workflow Discord avance toujours.
+    try {
+        if (message.channel.parentId !== COMPTE_CREE_CATEGORY_ID) {
+            await message.channel.setParent(COMPTE_CREE_CATEGORY_ID, {
+                lockPermissions: false
+            });
+            console.log(`[Discord] Salon déplacé vers la catégorie VA OP: ${COMPTE_CREE_CATEGORY_ID}.`);
+        }
+    } catch (error) {
+        console.log('[Discord] Erreur déplacement salon vers catégorie VA OP.');
+        console.log(error);
+    }
+
+    // Le rôle VA OP est ajouté avant de retirer l'ancien rôle VA.
+    try {
+        if (!member.roles.cache.has(COMPTE_CREE_ROLE_ID)) {
+            await member.roles.add(COMPTE_CREE_ROLE_ID);
+            console.log(`[Discord] Rôle VA OP ajouté à ${message.author.id}.`);
+        }
+    } catch (error) {
+        console.log('[Discord] Erreur ajout rôle VA OP.');
+        console.log(error);
+    }
+
+    // L'ancien rôle VA est retiré même si l'analyse Instagram échoue ensuite.
+    try {
+        if (member.roles.cache.has(VA_ROLE_ID)) {
+            await member.roles.remove(VA_ROLE_ID);
+            console.log(`[Discord] Ancien rôle VA retiré à ${message.author.id}.`);
+        }
+    } catch (error) {
+        console.log('[Discord] Erreur retrait ancien rôle VA.');
+        console.log(error);
+    }
+}
+
 function validateInstagramProfile(profile) {
     const missingItems = [];
     const biography = profile.biography || '';
@@ -405,33 +445,22 @@ function getInstagramFetchErrorMessage(reason, username) {
 }
 
 async function validateInstagramAccount(message, username) {
-    const validationKey = `${message.guild.id}:${message.channel.id}`;
+    const result = await fetchInstagramProfile(username);
 
-    if (instagramValidationsInProgress.has(validationKey)) {
-        console.log(`[Instagram] Analyse ignorée pour @${username}: une validation est déjà en cours dans ${message.channel.id}.`);
+    if (!result.ok) {
+        console.log(`[Instagram] Validation impossible pour @${username}. Raison: ${result.reason}`);
+        await message.channel.send(getInstagramFetchErrorMessage(result.reason, username));
         return;
     }
 
-    instagramValidationsInProgress.add(validationKey);
-    await message.channel.send('🔎 Analyse automatique du compte Instagram en cours...');
+    console.log(`[Instagram] Profil récupéré via: ${result.profile.source}`);
 
-    try {
-        const result = await fetchInstagramProfile(username);
+    const validation = validateInstagramProfile(result.profile);
 
-        if (!result.ok) {
-            console.log(`[Instagram] Validation impossible pour @${username}. Raison: ${result.reason}`);
-            await message.channel.send(getInstagramFetchErrorMessage(result.reason, username));
-            return;
-        }
+    console.log(`[Instagram] Validation @${username}: ${validation.isValid ? 'valide' : 'non valide'}`);
 
-        console.log(`[Instagram] Profil récupéré via: ${result.profile.source}`);
-
-        const validation = validateInstagramProfile(result.profile);
-
-        console.log(`[Instagram] Validation @${username}: ${validation.isValid ? 'valide' : 'non valide'}`);
-
-        if (!validation.isValid) {
-            await message.channel.send(`
+    if (!validation.isValid) {
+        await message.channel.send(`
 ❌ **Compte Instagram non valide**
 
 ${formatMissingItems(validation.missingItems)}.
@@ -440,12 +469,12 @@ ${formatValidationDetails(validation.missingItems)}
 
 Corrige le compte, puis renvoie le lien Instagram ici pour une nouvelle vérification automatique.
         `);
-            return;
-        }
+        return;
+    }
 
-        const updatedChannel = await message.channel.setName(getValidatedChannelName(username));
+    const updatedChannel = await message.channel.setName(getValidatedChannelName(username));
 
-        await message.channel.send(`
+    await message.channel.send(`
 ✅ **Compte Instagram valide**
 
 Bio présente.
@@ -454,10 +483,7 @@ Photo de profil présente.
 Le salon a été renommé en **${updatedChannel.name}**.
     `);
 
-        await updateDashboard(message.guild);
-    } finally {
-        instagramValidationsInProgress.delete(validationKey);
-    }
+    await updateDashboard(message.guild);
 }
 
 // ========================================
@@ -793,14 +819,6 @@ client.on('messageCreate', async message => {
 
         if (message.author.bot) return;
 
-        // DEBUG LOGS
-        console.log('====================');
-        console.log('MESSAGE DETECTÉ');
-        console.log(message.content);
-        console.log('TOPIC:', message.channel.topic);
-        console.log('AUTHOR:', message.author.id);
-        console.log('====================');
-
         // Vérifie salon privé utilisateur
         if (message.channel.topic !== message.author.id) return;
 
@@ -808,9 +826,39 @@ client.on('messageCreate', async message => {
 
         if (!instagramUsername) return;
 
-        console.log(`🔥 Lien Instagram détecté : @${instagramUsername}`);
+        // Verrou par message: évite qu'un même événement Discord déclenche deux workflows.
+        if (processedInstagramMessages.has(message.id)) {
+            console.log(`[Instagram] Message déjà traité, ignoré: ${message.id}`);
+            return;
+        }
 
-        await validateInstagramAccount(message, instagramUsername);
+        processedInstagramMessages.add(message.id);
+        setTimeout(() => processedInstagramMessages.delete(message.id), 10 * 60 * 1000);
+
+        const workflowKey = `${message.guild.id}:${message.channel.id}`;
+
+        // Verrou par salon: évite deux transitions/réponses si deux liens arrivent en même temps.
+        if (instagramValidationsInProgress.has(workflowKey)) {
+            console.log(`[Instagram] Workflow déjà en cours dans ${message.channel.id}, message ignoré: ${message.id}`);
+            return;
+        }
+
+        console.log('====================');
+        console.log(`[Instagram] Lien détecté: @${instagramUsername}`);
+        console.log(`[Instagram] Message: ${message.id}`);
+        console.log(`[Instagram] Salon: ${message.channel.id}`);
+        console.log(`[Instagram] Auteur: ${message.author.id}`);
+        console.log('====================');
+
+        instagramValidationsInProgress.add(workflowKey);
+
+        try {
+            await moveVaToVaOp(message);
+            await updateDashboard(message.guild);
+            await validateInstagramAccount(message, instagramUsername);
+        } finally {
+            instagramValidationsInProgress.delete(workflowKey);
+        }
 
     } catch (error) {
 
