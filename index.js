@@ -69,6 +69,14 @@ function stripHtml(value = '') {
     return decodeHtmlEntities(value.replace(/<[^>]*>/g, '')).trim();
 }
 
+function normalizeInstagramHtml(html) {
+    return decodeHtmlEntities(html)
+        .replace(/\\u0022/g, '"')
+        .replace(/\\"/g, '"')
+        .replace(/\\\//g, '/')
+        .replace(/\\u0026/g, '&');
+}
+
 async function fetchWithTimeout(url, options = {}, timeoutMs = 15000) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
@@ -117,20 +125,25 @@ function extractJsonLd(html) {
 
 function extractJsonStringValue(html, key) {
     const pattern = new RegExp(`"${key}"\\s*:\\s*"((?:\\\\.|[^"\\\\])*)"`, 'i');
-    const match = html.match(pattern) || decodeHtmlEntities(html).match(pattern);
+    const match = html.match(pattern) || normalizeInstagramHtml(html).match(pattern);
 
     if (!match) return '';
 
     try {
         return JSON.parse(`"${match[1]}"`);
     } catch (error) {
-        return decodeHtmlEntities(match[1].replace(/\\u0026/g, '&').replace(/\\\//g, '/'));
+        return normalizeInstagramHtml(match[1]);
     }
 }
 
 function parseJsonBlock(rawJson) {
     try {
-        return JSON.parse(decodeHtmlEntities(rawJson));
+        const cleanJson = decodeHtmlEntities(rawJson)
+            .replace(/^<!--/, '')
+            .replace(/-->$/, '')
+            .trim();
+
+        return JSON.parse(cleanJson);
     } catch (error) {
         return null;
     }
@@ -139,10 +152,17 @@ function parseJsonBlock(rawJson) {
 function extractPublicJsonBlocks(html) {
     const blocks = [];
     const scriptPattern = /<script\b[^>]*type=["']application\/json["'][^>]*>(.*?)<\/script>/gis;
+    const nextDataPattern = /<script\b[^>]*id=["']__NEXT_DATA__["'][^>]*>(.*?)<\/script>/is;
     let match;
 
     while ((match = scriptPattern.exec(html)) !== null) {
         const parsed = parseJsonBlock(match[1]);
+        if (parsed) blocks.push(parsed);
+    }
+
+    const nextDataMatch = html.match(nextDataPattern);
+    if (nextDataMatch) {
+        const parsed = parseJsonBlock(nextDataMatch[1]);
         if (parsed) blocks.push(parsed);
     }
 
@@ -161,7 +181,7 @@ function isDefaultInstagramProfilePicture(value) {
 
 function rememberBiography(signals, value) {
     const biography = stripHtml(String(value || ''));
-    if (biography && !signals.biography) {
+    if (biography && !signals.biography && !/^see instagram photos and videos/i.test(biography)) {
         signals.biography = biography;
     }
 }
@@ -232,7 +252,7 @@ function parsePublicInstagramPage(html, username, status) {
     const canonicalUrl = extractMetaContent(html, 'og:url');
     const ogTitle = extractMetaContent(html, 'og:title');
     const lowerUsername = username.toLowerCase();
-    const searchableHtml = decodeHtmlEntities(html).replace(/\\\//g, '/');
+    const searchableHtml = normalizeInstagramHtml(html);
     const signals = {
         usernameFound: false,
         biography: '',
@@ -248,6 +268,7 @@ function parsePublicInstagramPage(html, username, status) {
         extractJsonStringValue(html, 'biography') ||
         extractJsonStringValue(html, 'bio') ||
         searchableHtml.match(/"biography_with_entities"\s*:\s*\{[^}]*"raw_text"\s*:\s*"((?:\\.|[^"\\])*)"/i)?.[1] ||
+        ogDescription.match(/(?:on Instagram|sur Instagram)\s*:\s*["“](.+?)["”]\s*$/i)?.[1] ||
         '';
     const rawProfilePicture = signals.profilePicture ||
         extractJsonStringValue(html, 'profile_pic_url_hd') ||
@@ -260,8 +281,15 @@ function parsePublicInstagramPage(html, username, status) {
         searchableHtml.match(/"posts_count"\s*:\s*(\d+)/) ||
         ogDescription.match(/([\d,.]+)\s+(?:posts?|publications?)/i);
     const biography = stripHtml(rawBiography);
+    const hasVisiblePostMarker = /<meta[^>]+property=["']og:image["'][^>]+content=["'][^"']+instagram[^"']+["']/i.test(html) ||
+        /"shortcode"\s*:\s*"[^"]+"/i.test(searchableHtml) ||
+        /"display_url"\s*:\s*"[^"]+"/i.test(searchableHtml);
     const fallbackPostCount = mediaCountMatch ? Number(String(mediaCountMatch[1]).replace(/[,.]/g, '')) : 0;
-    const postCount = Math.max(signals.postCount, Number.isFinite(fallbackPostCount) ? fallbackPostCount : 0);
+    const postCount = Math.max(
+        signals.postCount,
+        Number.isFinite(fallbackPostCount) ? fallbackPostCount : 0,
+        hasVisiblePostMarker ? 1 : 0
+    );
     const profileExists = status === 200 &&
         !/Sorry, this page isn't available|Page Not Found|Cette page n’est malheureusement pas disponible/i.test(html) &&
         (
@@ -272,14 +300,16 @@ function parsePublicInstagramPage(html, username, status) {
             searchableHtml.toLowerCase().includes(`/${lowerUsername}/`)
         );
 
-    console.log(`[Instagram] Signaux: profil=${profileExists} username=${signals.usernameFound} bio=${Boolean(biography)} photo=${!isDefaultInstagramProfilePicture(rawProfilePicture)} posts=${postCount}`);
+    const hasProfilePicture = profileExists && !isDefaultInstagramProfilePicture(rawProfilePicture);
+
+    console.log(`[Instagram] Signaux: profil=${profileExists} username=${signals.usernameFound} bio=${Boolean(biography)} photo=${hasProfilePicture} posts=${postCount}`);
 
     return {
         username,
         profileExists,
         biography,
         hasBio: Boolean(biography.trim()),
-        hasProfilePicture: !isDefaultInstagramProfilePicture(rawProfilePicture),
+        hasProfilePicture,
         postCount: Number.isFinite(postCount) ? postCount : 0
     };
 }
@@ -469,7 +499,6 @@ async function createInstagramWorkflowChannel(message, username) {
         }
 
         await updateVaOpRoles(message);
-        await sendAndPinVaOpMessage(existingFinalChannel, message.content);
 
         if (existingFinalChannel.id !== message.channel.id) {
             await message.channel.delete().catch(error => {
