@@ -1,7 +1,13 @@
 const fs = require('fs/promises');
 const path = require('path');
+const { CONFIG } = require('./config');
+
+const METRICS_FILE = path.join(__dirname, '..', 'data', 'dashboard-metrics.json');
+const MAX_COMMAND_EVENTS = 20000;
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 const DEFAULT_METRICS = {
+    version: 2,
     totals: {
         onboardingStarts: 0,
         instagramSubmissions: 0,
@@ -9,13 +15,20 @@ const DEFAULT_METRICS = {
         completedOnboarding: 0
     },
     commands: {},
+    commandEvents: [],
     days: {}
 };
 
-const METRICS_FILE = path.join(__dirname, '..', 'data', 'dashboard-metrics.json');
+function getDayKey(date = new Date(), timeZone = CONFIG.guild.metricsTimeZone) {
+    const parts = new Intl.DateTimeFormat('en-CA', {
+        day: '2-digit',
+        month: '2-digit',
+        timeZone,
+        year: 'numeric'
+    }).formatToParts(date);
+    const values = Object.fromEntries(parts.map(part => [part.type, part.value]));
 
-function getTodayKey(date = new Date()) {
-    return date.toISOString().slice(0, 10);
+    return `${values.year}-${values.month}-${values.day}`;
 }
 
 function createDailyMetrics() {
@@ -27,29 +40,93 @@ function createDailyMetrics() {
         users: {
             commands: [],
             start: [],
-            warmup: []
+            warmup: [],
+            views: []
         }
     };
 }
 
+function normalizeUserList(value) {
+    return Array.isArray(value) ? value : [];
+}
+
 function normalizeDailyMetrics(day = {}) {
+    const defaultDay = createDailyMetrics();
     const normalized = {
-        ...createDailyMetrics(),
+        ...defaultDay,
         ...day,
+        commands: day.commands || {},
         users: {
-            ...createDailyMetrics().users,
+            ...defaultDay.users,
             ...(day.users || {})
         }
     };
 
-    normalized.users.commands = Array.isArray(normalized.users.commands) ? normalized.users.commands : [];
-    normalized.users.start = Array.isArray(normalized.users.start) ? normalized.users.start : [];
-    normalized.users.warmup = Array.isArray(normalized.users.warmup) ? normalized.users.warmup : [];
+    normalized.users.commands = normalizeUserList(normalized.users.commands);
+    normalized.users.start = normalizeUserList(normalized.users.start);
+    normalized.users.warmup = normalizeUserList(normalized.users.warmup);
+    normalized.users.views = normalizeUserList(normalized.users.views);
 
     return normalized;
 }
 
+function normalizeCommandStats(commandStats = {}) {
+    const normalized = {};
+
+    for (const [commandName, stats] of Object.entries(commandStats || {})) {
+        normalized[commandName] = {
+            total: Number(stats?.total || 0),
+            users: normalizeUserList(stats?.users)
+        };
+    }
+
+    return normalized;
+}
+
+function normalizeCommandEvents(commandEvents = []) {
+    return commandEvents
+        .filter(event => event?.commandName && event?.userId && event?.timestamp)
+        .map(event => ({
+            commandName: String(event.commandName),
+            timestamp: String(event.timestamp),
+            userId: String(event.userId)
+        }))
+        .sort((first, second) => new Date(first.timestamp) - new Date(second.timestamp))
+        .slice(-MAX_COMMAND_EVENTS);
+}
+
+function getLegacyEventTimestamp(dayKey, now = new Date()) {
+    if (dayKey === getDayKey(now)) {
+        return now.toISOString();
+    }
+
+    return `${dayKey}T12:00:00.000Z`;
+}
+
+function buildLegacyCommandEvents(rawMetrics = {}) {
+    const events = [];
+
+    for (const [dayKey, day] of Object.entries(rawMetrics.days || {})) {
+        const timestamp = getLegacyEventTimestamp(dayKey);
+
+        for (const [commandName, count] of Object.entries(day.commands || {})) {
+            for (let index = 0; index < Number(count || 0); index += 1) {
+                events.push({
+                    commandName,
+                    timestamp,
+                    userId: `legacy-${commandName}`
+                });
+            }
+        }
+    }
+
+    return events;
+}
+
 function normalizeMetrics(rawMetrics = {}) {
+    const commandEvents = rawMetrics.commandEvents?.length
+        ? rawMetrics.commandEvents
+        : buildLegacyCommandEvents(rawMetrics);
     const normalized = {
         ...structuredClone(DEFAULT_METRICS),
         ...rawMetrics,
@@ -57,7 +134,8 @@ function normalizeMetrics(rawMetrics = {}) {
             ...DEFAULT_METRICS.totals,
             ...(rawMetrics.totals || {})
         },
-        commands: rawMetrics.commands || {},
+        commands: normalizeCommandStats(rawMetrics.commands),
+        commandEvents: normalizeCommandEvents(commandEvents),
         days: {}
     };
 
@@ -66,6 +144,24 @@ function normalizeMetrics(rawMetrics = {}) {
     }
 
     return normalized;
+}
+
+function addUnique(values, value) {
+    if (!values.includes(value)) {
+        values.push(value);
+    }
+}
+
+function countEvents(events, predicate) {
+    return events.reduce((total, event) => total + (predicate(event) ? 1 : 0), 0);
+}
+
+function countUniqueUsers(events) {
+    return new Set(events.map(event => event.userId)).size;
+}
+
+function getCommandCount(commands, commandName) {
+    return commands[commandName]?.total || 0;
 }
 
 function createStore() {
@@ -91,7 +187,8 @@ function createStore() {
             .catch(() => null)
             .then(async () => {
                 await fs.mkdir(path.dirname(METRICS_FILE), { recursive: true });
-                await fs.writeFile(METRICS_FILE, snapshot);
+                await fs.writeFile(`${METRICS_FILE}.tmp`, snapshot);
+                await fs.rename(`${METRICS_FILE}.tmp`, METRICS_FILE);
             })
             .catch(error => {
                 console.log('[Metrics] Impossible d’enregistrer les stats.');
@@ -101,7 +198,7 @@ function createStore() {
         return writeQueue;
     }
 
-    function getDay(dayKey = getTodayKey()) {
+    function getDay(dayKey = getDayKey()) {
         if (!metrics.days[dayKey]) {
             metrics.days[dayKey] = createDailyMetrics();
         }
@@ -113,27 +210,34 @@ function createStore() {
         metrics.totals[key] = (metrics.totals[key] || 0) + 1;
     }
 
-    function addUnique(values, value) {
-        if (!values.includes(value)) {
-            values.push(value);
-        }
-    }
+    async function recordCommand(commandName, userId, occurredAt = new Date()) {
+        const safeCommandName = String(commandName);
+        const safeUserId = String(userId);
+        const timestamp = occurredAt.toISOString();
+        const day = getDay(getDayKey(occurredAt));
 
-    async function recordCommand(commandName, userId) {
-        const day = getDay();
-
-        metrics.commands[commandName] = metrics.commands[commandName] || {
+        metrics.commands[safeCommandName] = metrics.commands[safeCommandName] || {
             total: 0,
             users: []
         };
-        metrics.commands[commandName].total += 1;
-        addUnique(metrics.commands[commandName].users, userId);
+        metrics.commands[safeCommandName].total += 1;
+        addUnique(metrics.commands[safeCommandName].users, safeUserId);
 
-        day.commands[commandName] = (day.commands[commandName] || 0) + 1;
-        addUnique(day.users.commands, userId);
+        metrics.commandEvents.push({
+            commandName: safeCommandName,
+            timestamp,
+            userId: safeUserId
+        });
+        metrics.commandEvents = metrics.commandEvents.slice(-MAX_COMMAND_EVENTS);
 
-        if (commandName === 'start') addUnique(day.users.start, userId);
-        if (commandName === 'warmup') addUnique(day.users.warmup, userId);
+        day.commands[safeCommandName] = (day.commands[safeCommandName] || 0) + 1;
+        addUnique(day.users.commands, safeUserId);
+
+        if (!day.users[safeCommandName]) {
+            day.users[safeCommandName] = [];
+        }
+
+        addUnique(day.users[safeCommandName], safeUserId);
 
         await save();
     }
@@ -162,12 +266,47 @@ function createStore() {
         await save();
     }
 
+    function getCommandAnalytics(now = new Date()) {
+        const todayKey = getDayKey(now);
+        const last24hStart = now.getTime() - DAY_MS;
+        const eventsToday = metrics.commandEvents.filter(event =>
+            getDayKey(new Date(event.timestamp)) === todayKey
+        );
+        const eventsLast24h = metrics.commandEvents.filter(event =>
+            new Date(event.timestamp).getTime() >= last24hStart
+        );
+
+        return {
+            commands: structuredClone(metrics.commands),
+            last24h: {
+                all: eventsLast24h.length,
+                start: countEvents(eventsLast24h, event => event.commandName === 'start'),
+                uniqueUsers: countUniqueUsers(eventsLast24h),
+                views: countEvents(eventsLast24h, event => event.commandName === 'views'),
+                warmup: countEvents(eventsLast24h, event => event.commandName === 'warmup')
+            },
+            today: {
+                all: eventsToday.length,
+                start: countEvents(eventsToday, event => event.commandName === 'start'),
+                uniqueUsers: countUniqueUsers(eventsToday),
+                views: countEvents(eventsToday, event => event.commandName === 'views'),
+                warmup: countEvents(eventsToday, event => event.commandName === 'warmup')
+            },
+            totals: {
+                all: Object.values(metrics.commands).reduce((total, stats) => total + (stats.total || 0), 0),
+                start: getCommandCount(metrics.commands, 'start'),
+                views: getCommandCount(metrics.commands, 'views'),
+                warmup: getCommandCount(metrics.commands, 'warmup')
+            }
+        };
+    }
+
     function getSnapshot() {
         const today = getDay();
 
         return {
+            commandAnalytics: getCommandAnalytics(),
             totals: structuredClone(metrics.totals),
-            commands: structuredClone(metrics.commands),
             today: structuredClone(today)
         };
     }
@@ -185,5 +324,5 @@ function createStore() {
 
 module.exports = {
     createStore,
-    getTodayKey
+    getDayKey
 };

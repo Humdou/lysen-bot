@@ -114,9 +114,7 @@ async function collectDashboardStats(guild, client, metricsStore) {
     const vaActiveChannelCount = countTextChannels(channels, vaActiveCategory?.id || CONFIG.guild.vaActiveCategoryId);
     const vaOpChannelCount = countTextChannels(channels, vaOpCategory?.id || CONFIG.guild.vaOpCategoryId);
     const totalActiveChannels = vaActiveChannelCount + vaOpChannelCount;
-    const commandUsersToday = snapshot.today.users.commands.length;
-    const startUsersTotal = snapshot.commands.start?.users.length || 0;
-    const warmupUsersTotal = snapshot.commands.warmup?.users.length || 0;
+    const { commandAnalytics } = snapshot;
     const completedOnboarding = Math.max(
         snapshot.totals.completedOnboarding || 0,
         vaOpRole?.members.size || 0
@@ -129,11 +127,9 @@ async function collectDashboardStats(guild, client, metricsStore) {
             uptime: formatDuration(client.uptime || process.uptime() * 1000)
         },
         commands: {
-            commandUsersToday,
-            startUsersToday: snapshot.today.users.start.length,
-            startUsersTotal,
-            warmupUsersToday: snapshot.today.users.warmup.length,
-            warmupUsersTotal
+            last24h: commandAnalytics.last24h,
+            today: commandAnalytics.today,
+            totals: commandAnalytics.totals
         },
         general: {
             completedOnboarding,
@@ -228,11 +224,16 @@ function buildDashboardEmbed(guild, stats, refreshedAt = new Date()) {
                     SECTION_DIVIDER,
                     '',
                     pair(
-                        metricLine('🚀', '/start', `${formatNumber(stats.commands.startUsersTotal)} total • ${formatNumber(stats.commands.startUsersToday)} aujourd’hui`),
-                        metricLine('🔥', '/warmup', `${formatNumber(stats.commands.warmupUsersTotal)} total • ${formatNumber(stats.commands.warmupUsersToday)} aujourd’hui`)
+                        metricLine('🚀', '/start', `${formatNumber(stats.commands.totals.start)} total • ${formatNumber(stats.commands.today.start)} aujourd’hui • ${formatNumber(stats.commands.last24h.start)} sur 24h`),
+                        metricLine('🔥', '/warmup', `${formatNumber(stats.commands.totals.warmup)} total • ${formatNumber(stats.commands.today.warmup)} aujourd’hui • ${formatNumber(stats.commands.last24h.warmup)} sur 24h`)
                     ),
                     '',
-                    metricLine('⚡', 'Utilisateurs de commandes aujourd’hui', formatNumber(stats.commands.commandUsersToday))
+                    pair(
+                        metricLine('📈', '/views', `${formatNumber(stats.commands.totals.views)} total • ${formatNumber(stats.commands.today.views)} aujourd’hui • ${formatNumber(stats.commands.last24h.views)} sur 24h`),
+                        metricLine('⚡', 'Toutes commandes', `${formatNumber(stats.commands.totals.all)} total • ${formatNumber(stats.commands.today.all)} aujourd’hui • ${formatNumber(stats.commands.last24h.all)} sur 24h`)
+                    ),
+                    '',
+                    metricLine('👤', 'Utilisateurs uniques de commandes', `${formatNumber(stats.commands.today.uniqueUsers)} aujourd’hui • ${formatNumber(stats.commands.last24h.uniqueUsers)} sur 24h`)
                 ].join('\n'),
                 inline: false
             },

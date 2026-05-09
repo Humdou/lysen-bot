@@ -7,7 +7,8 @@ const CONFIG = {
         vaActiveCategoryId: '1502055567760425122',
         vaOpCategoryId: '1502120982591045805',
         dashboardChannelName: '📊・dashboard',
-        dashboardUpdateIntervalMs: 30 * 60 * 1000
+        dashboardUpdateIntervalMs: 30 * 60 * 1000,
+        metricsTimeZone: process.env.METRICS_TIME_ZONE || 'Europe/Paris'
     },
     categories: {
         vaActive: 'VA ACTIF 😎',
