@@ -114,6 +114,8 @@ function normalizeRapidApiProfile(data) {
     const biography = findFirstValue(profile, [
         'biography',
         'bio',
+        'biography_text',
+        'biography_with_entities',
         'about',
         'description',
         'raw_text'
@@ -123,6 +125,8 @@ function normalizeRapidApiProfile(data) {
         'profile_pic_url',
         'profile_picture',
         'profilePicture',
+        'profile_pic',
+        'hd_profile_pic_url_info',
         'avatar',
         'image'
     ]);
@@ -134,15 +138,27 @@ function normalizeRapidApiProfile(data) {
         'highlight_reel_count',
         'highlights_count',
         'highlight_count',
+        'highlights',
+        'highlight_reels',
         'story_highlights_count',
-        'total_highlights'
+        'total_highlights',
+        'total_highlight_reels'
     ]);
+
+    const normalizedBiography = typeof biography === 'object'
+        ? biography.raw_text || biography.text || ''
+        : biography;
+    const normalizedProfilePicture = typeof profilePicture === 'object'
+        ? profilePicture.url || profilePicture.uri || profilePicture.src
+        : profilePicture;
 
     return {
         source: 'rapidapi',
-        biography: stripHtml(String(biography || '')),
-        hasProfilePicture: Boolean(profilePicture) && anonymousProfilePicture !== true,
-        highlightsCount: Number.isFinite(Number(highlights)) ? Number(highlights) : 0
+        biography: stripHtml(String(normalizedBiography || '')),
+        hasProfilePicture: Boolean(normalizedProfilePicture) && anonymousProfilePicture !== true,
+        highlightsCount: Array.isArray(highlights)
+            ? highlights.length
+            : Number.isFinite(Number(highlights)) ? Number(highlights) : 0
     };
 }
 
@@ -161,7 +177,7 @@ async function fetchInstagramProfileWithRapidApi(username) {
 
     try {
         const url = new URL(RAPIDAPI_INSTAGRAM_PROFILE_URL);
-        url.searchParams.set('username_or_id_or_url', username);
+        url.searchParams.set('username', username);
 
         console.log(`[RapidAPI] Host: ${RAPIDAPI_INSTAGRAM_HOST}`);
         console.log(`[RapidAPI] Requête: ${url.toString()}`);
@@ -175,9 +191,11 @@ async function fetchInstagramProfileWithRapidApi(username) {
         const contentType = response.headers.get('content-type') || 'unknown';
         const body = await response.text();
 
+        console.log(`[RapidAPI] Endpoint utilisé: ${url.toString()}`);
         console.log(`[RapidAPI] Status: ${response.status}`);
         console.log(`[RapidAPI] Content-Type: ${contentType}`);
         console.log(`[RapidAPI] Taille réponse: ${body.length} caractères`);
+        console.log(`[RapidAPI] Réponse API: ${body}`);
 
         if (response.status === 401 || response.status === 403) {
             return {
