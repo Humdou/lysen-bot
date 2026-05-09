@@ -1,17 +1,5 @@
 require('dotenv').config();
 
-const CATEGORY_ID = '1502055567760425122';
-const COMPTE_CREE_CATEGORY_ID = '1502120982591045805';
-const DASHBOARD_CHANNEL_NAME = '📊・dashboard';
-const DASHBOARD_UPDATE_INTERVAL_MS = 12 * 60 * 60 * 1000;
-const INSTAGRAM_BASE_URL = 'https://www.instagram.com';
-const VA_ACTIVE_CATEGORY_NAME = 'VA ACTIF 😎';
-const VA_OP_CATEGORY_NAME = 'VA OP ☑️';
-
-const VA_ROLE_ID = '1502068514264055909';
-const COMPTE_CREE_ROLE_ID = '1502084425092169749';
-const MANAGER_ROLE_ID = '1502083797993263144';
-
 const {
     Client,
     GatewayIntentBits,
@@ -20,6 +8,29 @@ const {
     EmbedBuilder,
     SlashCommandBuilder
 } = require('discord.js');
+
+const CONFIG = {
+    guild: {
+        vaActiveCategoryId: '1502055567760425122',
+        vaOpCategoryId: '1502120982591045805',
+        dashboardChannelName: '📊・dashboard',
+        dashboardUpdateIntervalMs: 12 * 60 * 60 * 1000
+    },
+    categories: {
+        vaActive: 'VA ACTIF 😎',
+        vaOp: 'VA OP 🫡'
+    },
+    roles: {
+        vaActive: '1502068514264055909',
+        vaOp: '1502084425092169749',
+        manager: '1502083797993263144'
+    },
+    resources: {
+        formationUrl: 'https://discord.com/channels/1485476914218139740/1485480069358161940',
+        warmupVideoUrl: 'https://discord.com/channels/1485476914218139740/1486893390262960320',
+        usefulChannels: ['<#1485480560741847212>', '<#1485480522023964772>']
+    }
+};
 
 const client = new Client({
     intents: [
@@ -31,283 +42,279 @@ const client = new Client({
 });
 
 const dashboardMessages = new Map();
-const instagramValidationsInProgress = new Set();
+const startLocks = new Set();
+const vaOpTransitionLocks = new Set();
 const processedInstagramMessages = new Set();
 
 // ========================================
-// VALIDATION INSTAGRAM
+// SHARED HELPERS
 // ========================================
 
-function extractInstagramUsername(content) {
-    const instagramUrlMatch = content.match(/(?:https?:\/\/)?(?:www\.)?instagram\.com\/([a-zA-Z0-9._]+)(?:[/?#]|$)/i);
-
-    if (!instagramUrlMatch) return null;
-
-    const username = instagramUrlMatch[1]
-        .split('?')[0]
-        .split('#')[0]
-        .replace(/^@/, '')
-        .replace(/\/+$/, '')
-        .toLowerCase();
-    const reservedPaths = ['p', 'reel', 'reels', 'stories', 'explore', 'accounts', 'direct'];
-
-    if (!username || reservedPaths.includes(username)) return null;
-
-    return username;
+function getWorkflowKey(guildId, userId) {
+    return `${guildId}:${userId}`;
 }
 
-function decodeHtmlEntities(value = '') {
-    return value
-        .replace(/&quot;/g, '"')
-        .replace(/&#x27;/g, "'")
-        .replace(/&#39;/g, "'")
-        .replace(/&amp;/g, '&')
-        .replace(/&lt;/g, '<')
-        .replace(/&gt;/g, '>');
-}
-
-function stripHtml(value = '') {
-    return decodeHtmlEntities(value.replace(/<[^>]*>/g, '')).trim();
-}
-
-function normalizeInstagramHtml(html) {
-    return decodeHtmlEntities(html)
-        .replace(/\\u0022/g, '"')
-        .replace(/\\"/g, '"')
-        .replace(/\\\//g, '/')
-        .replace(/\\u0026/g, '&');
-}
-
-async function fetchWithTimeout(url, options = {}, timeoutMs = 15000) {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), timeoutMs);
-
-    try {
-        return await fetch(url, {
-            ...options,
-            signal: controller.signal,
-            headers: options.headers || {}
-        });
-    } finally {
-        clearTimeout(timeout);
-    }
-}
-
-function buildInstagramProfileUrl(username) {
-    return `${INSTAGRAM_BASE_URL}/${username}/`;
-}
-
-function extractMetaContent(html, property) {
-    const metaTags = html.match(/<meta\b[^>]*>/gi) || [];
-
-    for (const tag of metaTags) {
-        const propertyMatch = tag.match(/(?:property|name)=["']([^"']+)["']/i);
-        if (!propertyMatch || propertyMatch[1] !== property) continue;
-
-        const contentMatch = tag.match(/content=["']([^"']*)["']/i);
-        return contentMatch ? decodeHtmlEntities(contentMatch[1]) : '';
-    }
-
-    return '';
-}
-
-function hasMetaTag(html, property) {
-    return Boolean(extractMetaContent(html, property));
-}
-
-function isDefaultInstagramProfilePicture(value) {
-    const text = String(value || '');
-    return !text ||
-        text.includes('44884218_345707102882519_2446069589734326272_n.jpg') ||
-        text.includes('anonymousUser.jpg');
-}
-
-function parsePublicInstagramPage(html, username, status) {
-    const ogDescription = extractMetaContent(html, 'og:description');
-    const metaDescription = extractMetaContent(html, 'description');
-    const ogImage = extractMetaContent(html, 'og:image');
-    const canonicalUrl = extractMetaContent(html, 'og:url');
-    const ogTitle = extractMetaContent(html, 'og:title');
-    const lowerUsername = username.toLowerCase();
-    const searchableHtml = normalizeInstagramHtml(html);
-    const rawBiography = ogDescription ||
-        metaDescription ||
-        searchableHtml.match(/(?:biography|description)"?\s*:\s*"([^"]+)"/i)?.[1] ||
-        '';
-    const rawProfilePicture = ogImage ||
-        searchableHtml.match(/"profile_pic_url(?:_hd)?"\s*:\s*"(https?:\/\/[^"]+)"/i)?.[1] ||
-        searchableHtml.match(/"profile_picture"\s*:\s*"(https?:\/\/[^"]+)"/i)?.[1] ||
-        searchableHtml.match(/https?:\/\/[^"']+(?:profile|scontent|cdninstagram)[^"']+/i)?.[0] ||
-        '';
-    const mediaCountMatch = searchableHtml.match(/"edge_owner_to_timeline_media"\s*:\s*\{\s*"count"\s*:\s*(\d+)/) ||
-        searchableHtml.match(/"media_count"\s*:\s*(\d+)/) ||
-        searchableHtml.match(/"post_count"\s*:\s*(\d+)/) ||
-        searchableHtml.match(/"posts_count"\s*:\s*(\d+)/) ||
-        ogDescription.match(/([\d,.]+)\s+(?:posts?|publications?)/i);
-    const biography = stripHtml(rawBiography);
-    const hasBioSignal = hasMetaTag(html, 'og:description') ||
-        hasMetaTag(html, 'description') ||
-        Boolean(biography.trim()) ||
-        /(?:biography|description)"?\s*:\s*"(?!")/i.test(searchableHtml);
-    const hasPhotoSignal = hasMetaTag(html, 'og:image') ||
-        Boolean(rawProfilePicture) ||
-        /"profile_pic_url(?:_hd)?"\s*:\s*"https?:\/\//i.test(searchableHtml) ||
-        /"profile_picture"\s*:\s*"https?:\/\//i.test(searchableHtml) ||
-        /https?:\/\/[^"']+(?:scontent|cdninstagram)[^"']+/i.test(searchableHtml) ||
-        /<meta[^>]+property=["']og:image["'][^>]+content=["']https?:\/\/[^"']+["']/i.test(html);
-    const hasVisiblePostMarker = /<meta[^>]+property=["']og:image["'][^>]+content=["'][^"']+instagram[^"']+["']/i.test(html) ||
-        /"shortcode"\s*:\s*"[^"]+"/i.test(searchableHtml) ||
-        /"display_url"\s*:\s*"[^"]+"/i.test(searchableHtml);
-    const fallbackPostCount = mediaCountMatch ? Number(String(mediaCountMatch[1]).replace(/[,.]/g, '')) : 0;
-    const postCount = Math.max(
-        Number.isFinite(fallbackPostCount) ? fallbackPostCount : 0,
-        hasVisiblePostMarker ? 1 : 0
-    );
-    const notFound = status === 404 ||
-        /Sorry, this page isn't available|Page Not Found|Cette page n’est malheureusement pas disponible/i.test(html);
-    const profileExists = status >= 200 && status < 400 && !notFound;
-    const isPrivate = /"is_private"\s*:\s*true/i.test(searchableHtml) ||
-        /"isPrivate"\s*:\s*true/i.test(searchableHtml) ||
-        /this account is private|ce compte est privé/i.test(searchableHtml);
-    const isPublic = profileExists && !isPrivate;
-    const hasProfilePicture = profileExists && hasPhotoSignal && !isDefaultInstagramProfilePicture(rawProfilePicture);
-
-    console.log(`[Instagram] Username: ${username}`);
-    console.log(`[Instagram] Public: ${isPublic}`);
-    console.log(`[Instagram] Posts: ${postCount}`);
-    console.log(`[Instagram] Bio détectée: ${profileExists && hasBioSignal}`);
-    console.log(`[Instagram] Photo détectée: ${hasProfilePicture}`);
-
-    return {
-        username,
-        profileExists,
-        isPrivate,
-        biography,
-        hasBio: profileExists && hasBioSignal,
-        hasProfilePicture,
-        postCount: Number.isFinite(postCount) ? postCount : 0
-    };
-}
-
-async function fetchPublicInstagramProfile(username) {
-    const url = buildInstagramProfileUrl(username);
-
-    console.log('====================');
-    console.log(`[Instagram] Validation publique: @${username}`);
-    console.log(`[Instagram] URL normalisée: ${url}`);
-    console.log('====================');
-
-    try {
-        const response = await fetchWithTimeout(url, {
-            redirect: 'follow',
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-                'Accept-Language': 'fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-                'Referer': 'https://www.instagram.com/',
-                'Cache-Control': 'no-cache',
-                'Pragma': 'no-cache',
-                'Upgrade-Insecure-Requests': '1'
-            }
-        });
-        const html = await response.text();
-        const lowerHtml = html.toLowerCase();
-
-        console.log(`[Instagram] URL finale fetch: ${response.url || url}`);
-        console.log(`[Instagram] Status: ${response.status}`);
-        console.log(`[Instagram] Taille HTML: ${html.length} caractères`);
-        console.log('[Instagram] Début HTML reçu (3000 premiers caractères):');
-        console.log(html.slice(0, 3000));
-        console.log(`[Instagram] Contient "login": ${lowerHtml.includes('login')}`);
-        console.log(`[Instagram] Contient "instagram.com/accounts/login": ${lowerHtml.includes('instagram.com/accounts/login')}`);
-        console.log(`[Instagram] Contient "challenge": ${lowerHtml.includes('challenge')}`);
-        console.log(`[Instagram] Contient "Please wait": ${html.includes('Please wait')}`);
-        console.log(`[Instagram] Contient "meta property": ${lowerHtml.includes('meta property')}`);
-
-        if (!response.ok && response.status !== 404) {
-            return {
-                ok: false,
-                reason: 'unavailable'
-            };
-        }
-
-        return {
-            ok: true,
-            profile: parsePublicInstagramPage(html, username, response.status)
-        };
-    } catch (error) {
-        console.log('[Instagram] Erreur validation publique.');
-        console.log(error?.message || error);
-
-        return {
-            ok: false,
-            reason: 'unavailable'
-        };
-    }
-}
-
-function validateInstagramProfile(profile) {
-    const isValid = profile.profileExists &&
-        !profile.isPrivate;
-
-    if (isValid && profile.postCount < 1) {
-        console.log('[Instagram] Posts non visibles dans le HTML reçu, validation basée sur profil accessible et non privé.');
-    }
-
-    if (isValid && !profile.hasBio && !profile.hasProfilePicture) {
-        console.log('[Instagram] Bio/photo non visibles dans le HTML reçu, validation basée sur profil accessible et non privé.');
-    }
-
-    return {
-        isValid
-    };
-}
-
-function getVaChannelName(discordUsername, isValidated = false) {
-    const safeUsername = discordUsername
+function normalizeDiscordUsername(username = '') {
+    return username
         .toLowerCase()
         .replace(/[^a-z0-9_-]/g, '-')
         .replace(/-+/g, '-')
         .replace(/^-|-$/g, '')
-        .slice(0, 80);
+        .slice(0, 80) || 'va';
+}
 
-    return `cpt-${safeUsername || 'va'}${isValidated ? '-✅' : ''}`;
+function getVaChannelName(discordUsername) {
+    return `cpt-${normalizeDiscordUsername(discordUsername)}`;
+}
+
+function getPrivateChannelOverwrites(guild, userId) {
+    return [
+        {
+            id: guild.id,
+            deny: [PermissionsBitField.Flags.ViewChannel]
+        },
+        {
+            id: userId,
+            allow: [
+                PermissionsBitField.Flags.ViewChannel,
+                PermissionsBitField.Flags.SendMessages,
+                PermissionsBitField.Flags.ReadMessageHistory
+            ]
+        },
+        {
+            id: CONFIG.roles.manager,
+            allow: [
+                PermissionsBitField.Flags.ViewChannel,
+                PermissionsBitField.Flags.SendMessages,
+                PermissionsBitField.Flags.ReadMessageHistory
+            ]
+        }
+    ];
+}
+
+async function fetchGuildChannels(guild) {
+    await guild.channels.fetch();
+    return guild.channels.cache;
 }
 
 async function getCategoryByNameOrId(guild, categoryName, fallbackId) {
-    await guild.channels.fetch();
+    const channels = await fetchGuildChannels(guild);
 
-    const categoryByName = guild.channels.cache.find(channel =>
+    const categoryByName = channels.find(channel =>
         channel.type === ChannelType.GuildCategory &&
         channel.name === categoryName
     );
 
     if (categoryByName) return categoryByName;
 
-    const categoryById = guild.channels.cache.get(fallbackId);
+    const categoryById = channels.get(fallbackId);
     if (categoryById?.type === ChannelType.GuildCategory) return categoryById;
 
     throw new Error(`Catégorie Discord introuvable: ${categoryName}`);
 }
 
-async function sendDiscordMessage(channel, content) {
-    try {
-        await channel.send(content);
-    } catch (error) {
-        console.log('[Discord] Impossible d’envoyer le message.');
+async function getVaActiveCategory(guild) {
+    return getCategoryByNameOrId(
+        guild,
+        CONFIG.categories.vaActive,
+        CONFIG.guild.vaActiveCategoryId
+    );
+}
+
+async function getVaOpCategory(guild) {
+    return getCategoryByNameOrId(
+        guild,
+        CONFIG.categories.vaOp,
+        CONFIG.guild.vaOpCategoryId
+    );
+}
+
+async function findUserWorkflowChannel(guild, userId, categoryId = null) {
+    const channels = await fetchGuildChannels(guild);
+
+    return channels.find(channel =>
+        channel.type === ChannelType.GuildText &&
+        channel.topic === userId &&
+        (!categoryId || channel.parentId === categoryId)
+    ) || null;
+}
+
+async function createPrivateWorkflowChannel(guild, user, category) {
+    return guild.channels.create({
+        name: getVaChannelName(user.username),
+        type: ChannelType.GuildText,
+        parent: category.id,
+        topic: user.id,
+        permissionOverwrites: getPrivateChannelOverwrites(guild, user.id)
+    });
+}
+
+async function safePin(message, context) {
+    await message.pin().catch(error => {
+        console.log(`[Discord] Impossible d’épingler le message ${context}.`);
         console.log(error?.message || error);
+    });
+}
+
+async function safeDeleteChannel(channel, context) {
+    await channel.delete().catch(error => {
+        console.log(`[Discord] Impossible de supprimer le salon ${context}.`);
+        console.log(error?.message || error);
+    });
+}
+
+async function updateMemberRoles(member, { add = [], remove = [] }) {
+    for (const roleId of add) {
+        try {
+            if (!member.roles.cache.has(roleId)) {
+                await member.roles.add(roleId);
+            }
+        } catch (error) {
+            console.log(`[Discord] Impossible d’ajouter le rôle ${roleId}.`);
+            console.log(error?.message || error);
+        }
+    }
+
+    for (const roleId of remove) {
+        try {
+            if (member.roles.cache.has(roleId)) {
+                await member.roles.remove(roleId);
+            }
+        } catch (error) {
+            console.log(`[Discord] Impossible de retirer le rôle ${roleId}.`);
+            console.log(error?.message || error);
+        }
     }
 }
 
-async function sendAndPinVaOpMessage(channel, instagramUrl) {
-    const sentMessage = await channel.send(`
-📸 **Compte Instagram détecté :**
+async function replySafely(interaction, options) {
+    if (interaction.deferred || interaction.replied) {
+        return interaction.followUp(options);
+    }
 
-${instagramUrl}
+    return interaction.reply(options);
+}
+
+// ========================================
+// INSTAGRAM LINK DETECTION ONLY
+// ========================================
+
+function parseInstagramUrl(rawValue) {
+    const candidate = rawValue.startsWith('http://') || rawValue.startsWith('https://')
+        ? rawValue
+        : `https://${rawValue}`;
+
+    try {
+        const url = new URL(candidate);
+        const hostname = url.hostname.replace(/^www\./, '').toLowerCase();
+
+        if (hostname !== 'instagram.com') return null;
+
+        const pathParts = url.pathname
+            .split('/')
+            .map(part => part.trim())
+            .filter(Boolean);
+
+        if (!pathParts.length) return null;
+
+        const reservedPaths = new Set([
+            'about',
+            'accounts',
+            'direct',
+            'explore',
+            'p',
+            'privacy',
+            'reel',
+            'reels'
+        ]);
+
+        const firstPart = pathParts[0].toLowerCase();
+        const username = firstPart === 'stories' ? pathParts[1] : pathParts[0];
+
+        if (!username || reservedPaths.has(firstPart)) return null;
+
+        const cleanUsername = username
+            .replace(/^@/, '')
+            .replace(/[^a-zA-Z0-9._]/g, '')
+            .toLowerCase();
+
+        if (!cleanUsername || cleanUsername.length > 30) return null;
+
+        return {
+            username: cleanUsername,
+            url: `https://www.instagram.com/${cleanUsername}/`
+        };
+    } catch {
+        return null;
+    }
+}
+
+function extractInstagramProfile(content = '') {
+    const urlMatches = content.match(/(?:https?:\/\/)?(?:www\.)?instagram\.com\/[^\s<>()]+/gi) || [];
+
+    for (const match of urlMatches) {
+        const profile = parseInstagramUrl(match);
+        if (profile) return profile;
+    }
+
+    return null;
+}
+
+function isVaActiveWorkflowChannel(message, vaActiveCategoryId) {
+    return message.channel?.type === ChannelType.GuildText &&
+        message.channel.topic === message.author.id &&
+        message.channel.parentId === vaActiveCategoryId;
+}
+
+// ========================================
+// MESSAGES
+// ========================================
+
+function getOnboardingMessage() {
+    return `
+👋 **Bienvenue chez Lysen Agency**
 
 ━━━━━━━━━━━━━━
 
-✅ Ton compte est en cours de vérification automatique.
+⚠️ IMPORTANT :
+Lis bien toutes les étapes avant de commencer.
+
+📚 **ÉTAPE 1 — FORMATIONS**
+
+➜ ${CONFIG.resources.formationUrl}
+
+━━━━━━━━━━━━━━
+
+📱 **ÉTAPE 2 — CRÉATION DU COMPTE INSTAGRAM**
+
+Une fois les formations regardées :
+
+• crée ton compte Instagram ;
+• prépare correctement le compte ;
+• puis envoie le lien du compte directement dans ce salon.
+
+━━━━━━━━━━━━━━
+
+✅ **EXEMPLE :**
+
+https://instagram.com/nomducompte
+
+━━━━━━━━━━━━━━
+
+🔥 Une fois le lien envoyé,
+le bot déplacera automatiquement ton salon dans la suite du workflow.
+    `;
+}
+
+function getVaOpMessage(instagramProfile) {
+    return `
+📸 **Compte Instagram reçu :**
+
+${instagramProfile.url}
+
+━━━━━━━━━━━━━━
+
+✅ Ton salon est maintenant passé en **VA OP 🫡**.
 
 🔥 Continue maintenant :
 • ton warm-up ;
@@ -315,167 +322,138 @@ ${instagramUrl}
 • ta régularité.
 
 📚 Ressources utiles :
-➜ <#1485480560741847212>
-➜ <#1485480522023964772>
+➜ ${CONFIG.resources.usefulChannels[0]}
+➜ ${CONFIG.resources.usefulChannels[1]}
 
 🚀 Petit conseil :
 Créer un compte Threads peut énormément aider ton compte à faire plus de vues.
 
 ━━━━━━━━━━━━━━
-    `);
-
-    await sentMessage.pin().catch(error => {
-        console.log('[Discord] Impossible d’épingler le message VA OP.');
-        console.log(error?.message || error);
-    });
+    `;
 }
 
-async function updateVaOpRoles(message) {
-    const member = await message.guild.members.fetch(message.author.id);
-
-    try {
-        if (!member.roles.cache.has(COMPTE_CREE_ROLE_ID)) {
-            await member.roles.add(COMPTE_CREE_ROLE_ID);
-            console.log(`[Discord] Rôle VA OP ajouté à ${message.author.id}.`);
-        }
-    } catch (error) {
-        console.log('[Discord] Impossible d’ajouter le rôle VA OP.');
-        console.log(error?.message || error);
-    }
-
-    try {
-        if (member.roles.cache.has(VA_ROLE_ID)) {
-            await member.roles.remove(VA_ROLE_ID);
-            console.log(`[Discord] Rôle VA ACTIF retiré à ${message.author.id}.`);
-        }
-    } catch (error) {
-        console.log('[Discord] Impossible de retirer le rôle VA ACTIF.');
-        console.log(error?.message || error);
-    }
+async function sendAndPin(channel, content, context) {
+    const sentMessage = await channel.send(content);
+    await safePin(sentMessage, context);
+    return sentMessage;
 }
 
-async function createInstagramWorkflowChannel(message, username) {
-    const finalChannelName = getVaChannelName(message.author.username);
-    const vaOpCategory = await getCategoryByNameOrId(
-        message.guild,
-        VA_OP_CATEGORY_NAME,
-        COMPTE_CREE_CATEGORY_ID
+async function ensureVaOpMessage(channel, instagramProfile) {
+    const pinnedMessages = await channel.messages.fetchPinned().catch(() => null);
+    const existingPinnedBotMessage = pinnedMessages?.find(message =>
+        message.author.id === client.user.id &&
+        (
+            message.content.includes('VA OP 🫡') ||
+            message.content.includes('Compte Instagram reçu') ||
+            message.content.includes('Compte Instagram détecté')
+        )
     );
 
-    await message.guild.channels.fetch();
+    if (existingPinnedBotMessage) return existingPinnedBotMessage;
 
-    const existingFinalChannel = message.guild.channels.cache.find(channel =>
-        channel.type === ChannelType.GuildText &&
-        channel.parentId === vaOpCategory.id &&
-        channel.topic === message.author.id
-    );
+    return sendAndPin(channel, getVaOpMessage(instagramProfile), 'VA OP');
+}
 
-    if (existingFinalChannel) {
-        if (existingFinalChannel.name !== finalChannelName) {
-            await existingFinalChannel.setName(finalChannelName);
-        }
+// ========================================
+// WORKFLOW
+// ========================================
 
-        await updateVaOpRoles(message);
+async function startOnboarding(interaction) {
+    const workflowKey = getWorkflowKey(interaction.guild.id, interaction.user.id);
 
-        if (existingFinalChannel.id !== message.channel.id) {
-            await message.channel.delete().catch(error => {
-                console.log('[Discord] Impossible de supprimer l’ancien salon.');
-                console.log(error?.message || error);
-            });
-        }
-
-        await updateDashboard(message.guild);
-        return existingFinalChannel;
-    }
-
-    const finalChannel = await message.guild.channels.create({
-        name: finalChannelName,
-        type: ChannelType.GuildText,
-        parent: vaOpCategory.id,
-        topic: message.author.id,
-        permissionOverwrites: [
-            {
-                id: message.guild.id,
-                deny: [PermissionsBitField.Flags.ViewChannel],
-            },
-            {
-                id: message.author.id,
-                allow: [
-                    PermissionsBitField.Flags.ViewChannel,
-                    PermissionsBitField.Flags.SendMessages,
-                    PermissionsBitField.Flags.ReadMessageHistory
-                ],
-            },
-            {
-                id: MANAGER_ROLE_ID,
-                allow: [
-                    PermissionsBitField.Flags.ViewChannel,
-                    PermissionsBitField.Flags.SendMessages,
-                    PermissionsBitField.Flags.ReadMessageHistory
-                ],
-            },
-        ],
-    });
-
-    await updateVaOpRoles(message);
-    await sendAndPinVaOpMessage(finalChannel, message.content);
-
-    if (message.channel.id !== finalChannel.id) {
-        await message.channel.delete().catch(error => {
-            console.log('[Discord] Impossible de supprimer l’ancien salon.');
-            console.log(error?.message || error);
+    if (startLocks.has(workflowKey)) {
+        return replySafely(interaction, {
+            content: '⚠️ Création déjà en cours. Réessaie dans quelques secondes.',
+            ephemeral: true
         });
     }
 
-    await updateDashboard(message.guild);
-    return finalChannel;
+    startLocks.add(workflowKey);
+
+    try {
+        const existingChannel = await findUserWorkflowChannel(
+            interaction.guild,
+            interaction.user.id
+        );
+
+        if (existingChannel) {
+            return replySafely(interaction, {
+                content: `⚠️ Tu as déjà un salon privé : ${existingChannel}`,
+                ephemeral: true
+            });
+        }
+
+        const vaActiveCategory = await getVaActiveCategory(interaction.guild);
+        const member = await interaction.guild.members.fetch(interaction.user.id);
+
+        await updateMemberRoles(member, {
+            add: [CONFIG.roles.vaActive]
+        });
+
+        const channel = await createPrivateWorkflowChannel(
+            interaction.guild,
+            interaction.user,
+            vaActiveCategory
+        );
+
+        await sendAndPin(channel, getOnboardingMessage(), 'onboarding');
+        await updateDashboard(interaction.guild);
+
+        return replySafely(interaction, {
+            content: `✅ Ton salon privé a été créé : ${channel}`,
+            ephemeral: true
+        });
+    } finally {
+        startLocks.delete(workflowKey);
+    }
 }
 
-async function validateInstagramAccount(channel, username, discordUsername) {
+async function moveUserToVaOp(message, instagramProfile) {
+    const workflowKey = getWorkflowKey(message.guild.id, message.author.id);
+
+    if (vaOpTransitionLocks.has(workflowKey)) {
+        console.log(`[Workflow] Transition VA OP déjà en cours pour ${workflowKey}.`);
+        return;
+    }
+
+    vaOpTransitionLocks.add(workflowKey);
+
     try {
-        const result = await fetchPublicInstagramProfile(username);
+        const vaOpCategory = await getVaOpCategory(message.guild);
+        const finalChannelName = getVaChannelName(message.author.username);
+        const existingFinalChannel = await findUserWorkflowChannel(
+            message.guild,
+            message.author.id,
+            vaOpCategory.id
+        );
+        const finalChannel = existingFinalChannel || await createPrivateWorkflowChannel(
+            message.guild,
+            message.author,
+            vaOpCategory
+        );
 
-        if (!result.ok) {
-            console.log(`[Instagram][FAIL] Validation publique impossible pour @${username}.`);
-            await sendDiscordMessage(channel, '❌ Vérification Instagram temporairement indisponible. Réessaie plus tard.');
-            return;
+        if (finalChannel.name !== finalChannelName) {
+            await finalChannel.setName(finalChannelName);
         }
 
-        const validation = validateInstagramProfile(result.profile);
+        const member = await message.guild.members.fetch(message.author.id);
 
-        console.log(`[Instagram][${validation.isValid ? 'SUCCESS' : 'FAIL'}] @${username} bio=${result.profile.hasBio} photo=${result.profile.hasProfilePicture} posts=${result.profile.postCount}`);
+        await updateMemberRoles(member, {
+            add: [CONFIG.roles.vaOp],
+            remove: [CONFIG.roles.vaActive]
+        });
 
-        if (!validation.isValid) {
-            await sendDiscordMessage(channel, `
-❌ **Compte Instagram non valide**
+        await ensureVaOpMessage(finalChannel, instagramProfile);
 
-Le compte doit être :
-• public
-• avec au moins 1 post
-• avec une bio ou une photo de profil
-
-Corrige le compte puis renvoie le lien.
-        `);
-            return;
+        if (message.channel.id !== finalChannel.id) {
+            await safeDeleteChannel(message.channel, 'VA ACTIF');
         }
 
-        const validatedChannelName = getVaChannelName(discordUsername, true);
+        await updateDashboard(message.guild);
 
-        if (channel.name !== validatedChannelName) {
-            await channel.setName(validatedChannelName);
-        }
-
-        await sendDiscordMessage(channel, `
-✅ Compte Instagram valide
-
-Le compte respecte les conditions demandées.
-
-Le salon a été validé automatiquement.
-        `);
-    } catch (error) {
-        console.log('[Instagram] Erreur imprévue pendant la validation.');
-        console.log(error?.message || error);
-        await sendDiscordMessage(channel, '❌ Vérification Instagram temporairement indisponible. Réessaie plus tard.');
+        console.log(`[Workflow] ${message.author.id} déplacé en VA OP avec @${instagramProfile.username}.`);
+    } finally {
+        vaOpTransitionLocks.delete(workflowKey);
     }
 }
 
@@ -484,17 +462,16 @@ Le salon a été validé automatiquement.
 // ========================================
 
 async function getDashboardChannel(guild) {
-    await guild.channels.fetch();
-
-    const existingChannel = guild.channels.cache.find(channel =>
+    const channels = await fetchGuildChannels(guild);
+    const existingChannel = channels.find(channel =>
         channel.type === ChannelType.GuildText &&
-        channel.name === DASHBOARD_CHANNEL_NAME
+        channel.name === CONFIG.guild.dashboardChannelName
     );
 
     if (existingChannel) return existingChannel;
 
     return guild.channels.create({
-        name: DASHBOARD_CHANNEL_NAME,
+        name: CONFIG.guild.dashboardChannelName,
         type: ChannelType.GuildText,
         permissionOverwrites: [
             {
@@ -515,7 +492,7 @@ async function getDashboardChannel(guild) {
                 ]
             },
             {
-                id: MANAGER_ROLE_ID,
+                id: CONFIG.roles.manager,
                 allow: [
                     PermissionsBitField.Flags.ViewChannel,
                     PermissionsBitField.Flags.ReadMessageHistory
@@ -527,19 +504,25 @@ async function getDashboardChannel(guild) {
 
 async function getDashboardStats(guild) {
     await guild.members.fetch();
-    await guild.channels.fetch();
+    await fetchGuildChannels(guild);
 
-    const vaRole = await guild.roles.fetch(VA_ROLE_ID).catch(() => null);
-    const compteCreeRole = await guild.roles.fetch(COMPTE_CREE_ROLE_ID).catch(() => null);
+    const vaActiveRole = await guild.roles.fetch(CONFIG.roles.vaActive).catch(() => null);
+    const vaOpRole = await guild.roles.fetch(CONFIG.roles.vaOp).catch(() => null);
+    const vaActiveCategory = await getVaActiveCategory(guild).catch(() => null);
+    const vaOpCategory = await getVaOpCategory(guild).catch(() => null);
+    const workflowCategoryIds = [
+        vaActiveCategory?.id || CONFIG.guild.vaActiveCategoryId,
+        vaOpCategory?.id || CONFIG.guild.vaOpCategoryId
+    ];
 
     const openChannelsCount = guild.channels.cache.filter(channel =>
         channel.type === ChannelType.GuildText &&
-        [CATEGORY_ID, COMPTE_CREE_CATEGORY_ID].includes(channel.parentId)
+        workflowCategoryIds.includes(channel.parentId)
     ).size;
 
     return {
-        activeVaCount: vaRole ? vaRole.members.size : 0,
-        createdAccountsCount: compteCreeRole ? compteCreeRole.members.size : 0,
+        activeVaCount: vaActiveRole ? vaActiveRole.members.size : 0,
+        vaOpCount: vaOpRole ? vaOpRole.members.size : 0,
         openChannelsCount
     };
 }
@@ -556,8 +539,8 @@ function buildDashboardEmbed(guild, stats) {
                 inline: true
             },
             {
-                name: '📱 Comptes créés',
-                value: `${stats.createdAccountsCount}`,
+                name: '🫡 VA OP',
+                value: `${stats.vaOpCount}`,
                 inline: true
             },
             {
@@ -618,7 +601,7 @@ async function updateDashboard(guild) {
         dashboardMessages.set(guild.id, sentMessage.id);
     } catch (error) {
         console.log('❌ Erreur dashboard');
-        console.log(error);
+        console.log(error?.message || error);
     }
 }
 
@@ -627,6 +610,111 @@ async function updateAllDashboards() {
         await updateDashboard(guild);
     }
 }
+
+// ========================================
+// SLASH COMMANDS
+// ========================================
+
+const COMMAND_RESPONSES = {
+    warmup: `
+🔥 **WARM-UP INSTAGRAM**
+
+━━━━━━━━━━━━━━
+
+⏱️ Le warm-up doit durer environ 10 à 20 minutes.
+
+📱 Pendant le warm-up :
+• scroll ;
+• like ;
+• regarde des stories ;
+• commente naturellement ;
+• interagis normalement avec l’application.
+
+⚠️ Fais tout comme dans la vidéo.
+
+📚 Vidéo warm-up :
+➜ ${CONFIG.resources.warmupVideoUrl}
+
+━━━━━━━━━━━━━━
+    `,
+    pay: `
+💸 **PAIEMENTS**
+
+━━━━━━━━━━━━━━
+
+Les informations de paiement sont gérées par l’équipe.
+
+Si tu as une question sur un paiement, contacte un manager dans ton salon privé.
+
+━━━━━━━━━━━━━━
+    `,
+    reels: `
+🎬 **REELS**
+
+━━━━━━━━━━━━━━
+
+Poste régulièrement, garde un rythme stable et suis les consignes données dans les ressources.
+
+📚 Ressources utiles :
+➜ ${CONFIG.resources.usefulChannels[0]}
+➜ ${CONFIG.resources.usefulChannels[1]}
+
+━━━━━━━━━━━━━━
+    `,
+    threads: `
+🧵 **THREADS**
+
+━━━━━━━━━━━━━━
+
+Créer un compte Threads peut aider ton compte Instagram à obtenir plus de visibilité.
+
+Utilise-le naturellement et évite les actions trop répétitives.
+
+━━━━━━━━━━━━━━
+    `,
+    views: `
+📈 **VUES**
+
+━━━━━━━━━━━━━━
+
+Pour augmenter tes vues :
+• poste régulièrement ;
+• fais ton warm-up ;
+• teste plusieurs formats ;
+• garde les meilleurs hooks.
+
+━━━━━━━━━━━━━━
+    `,
+    shadowban: `
+⚠️ **SHADOWBAN**
+
+━━━━━━━━━━━━━━
+
+Si tes vues chutent fortement :
+• ralentis les actions répétitives ;
+• évite le spam ;
+• fais un warm-up propre ;
+• demande à un manager de regarder la situation avec toi.
+
+━━━━━━━━━━━━━━
+    `,
+    help: `
+📚 **COMMANDES DISPONIBLES**
+
+━━━━━━━━━━━━━━
+
+➜ /start
+➜ /warmup
+➜ /pay
+➜ /reels
+➜ /threads
+➜ /views
+➜ /shadowban
+➜ /help
+
+━━━━━━━━━━━━━━
+    `
+};
 
 function getSlashCommands() {
     return [
@@ -666,6 +754,26 @@ async function registerSlashCommands() {
     }
 }
 
+async function handleSlashCommand(interaction) {
+    if (interaction.commandName === 'start') {
+        await startOnboarding(interaction);
+        return;
+    }
+
+    const response = COMMAND_RESPONSES[interaction.commandName];
+
+    if (!response) return;
+
+    await interaction.reply({
+        content: response,
+        ephemeral: true
+    });
+}
+
+// ========================================
+// DISCORD EVENTS
+// ========================================
+
 client.once('ready', async () => {
     console.log(`🔥 Bot connecté : ${client.user.tag}`);
 
@@ -673,354 +781,59 @@ client.once('ready', async () => {
         console.log('[Discord] Impossible d’enregistrer les commandes slash.');
         console.log(error?.message || error);
     });
-    await updateAllDashboards();
-    setInterval(updateAllDashboards, DASHBOARD_UPDATE_INTERVAL_MS);
-});
 
-// ========================================
-// COMMANDES SLASH
-// ========================================
+    await updateAllDashboards();
+    setInterval(updateAllDashboards, CONFIG.guild.dashboardUpdateIntervalMs);
+});
 
 client.on('interactionCreate', async interaction => {
-
     if (!interaction.isChatInputCommand()) return;
 
-    // ========================================
-    // /start
-    // ========================================
+    try {
+        await handleSlashCommand(interaction);
+    } catch (error) {
+        console.log('[Discord] Erreur commande slash.');
+        console.log(error?.message || error);
 
-    if (interaction.commandName === 'start') {
-
-        try {
-
-            const existingChannel = interaction.guild.channels.cache.find(
-                channel => channel.topic === interaction.user.id
-            );
-
-            if (existingChannel) {
-                return interaction.reply({
-                    content: `⚠️ Tu as déjà un salon privé : ${existingChannel}`,
-                    ephemeral: true
-                });
-            }
-
-            const member = interaction.member;
-
-            await member.roles.add(VA_ROLE_ID);
-
-            const channel = await interaction.guild.channels.create({
-                name: `va-${interaction.user.username}`,
-                type: ChannelType.GuildText,
-                parent: CATEGORY_ID,
-                topic: interaction.user.id,
-
-                permissionOverwrites: [
-                    {
-                        id: interaction.guild.id,
-                        deny: [PermissionsBitField.Flags.ViewChannel],
-                    },
-                    {
-                        id: interaction.user.id,
-                        allow: [
-                            PermissionsBitField.Flags.ViewChannel,
-                            PermissionsBitField.Flags.SendMessages,
-                            PermissionsBitField.Flags.ReadMessageHistory
-                        ],
-                    },
-                    {
-                        id: MANAGER_ROLE_ID,
-                        allow: [
-                            PermissionsBitField.Flags.ViewChannel,
-                            PermissionsBitField.Flags.SendMessages,
-                            PermissionsBitField.Flags.ReadMessageHistory
-                        ],
-                    },
-                ],
-            });
-
-            await channel.send(`
-👋 **Bienvenue chez Lysen Agency**
-
-━━━━━━━━━━━━━━
-
-⚠️ IMPORTANT :
-Lis bien toutes les étapes avant de commencer.
-
-📚 **ÉTAPE 1 — FORMATIONS**
-
-➜ https://discord.com/channels/1485476914218139740/1485480069358161940
-
-━━━━━━━━━━━━━━
-
-📱 **ÉTAPE 2 — CRÉATION DU COMPTE INSTAGRAM**
-
-Une fois les formations regardées :
-
-• crée ton compte Instagram ;
-• prépare correctement le compte ;
-• puis envoie le lien du compte directement dans ce salon.
-
-━━━━━━━━━━━━━━
-
-✅ **EXEMPLE :**
-
-https://instagram.com/nomducompte
-
-━━━━━━━━━━━━━━
-
-🔥 Une fois le lien envoyé,
-le bot vérifiera automatiquement ton compte Instagram.
-            `);
-
-            await interaction.reply({
-                content: `✅ Ton salon privé a été créé : ${channel}`,
-                ephemeral: true
-            });
-
-            await updateDashboard(interaction.guild);
-
-        } catch (error) {
-
-            console.log(error);
-
-            await interaction.reply({
-                content: `❌ Une erreur est survenue.`,
-                ephemeral: true
-            });
-        }
-    }
-
-    // ========================================
-    // /warmup
-    // ========================================
-
-    if (interaction.commandName === 'warmup') {
-
-        await interaction.reply({
-            content: `
-🔥 **WARM-UP INSTAGRAM**
-
-━━━━━━━━━━━━━━
-
-⏱️ Le warm-up doit durer environ 10 à 20 minutes.
-
-📱 Pendant le warm-up :
-• scroll ;
-• like ;
-• regarde des stories ;
-• commente naturellement ;
-• interagis normalement avec l’application.
-
-⚠️ Fais tout comme dans la vidéo.
-
-📚 Vidéo warm-up :
-➜ https://discord.com/channels/1485476914218139740/1486893390262960320
-
-━━━━━━━━━━━━━━
-            `,
+        await replySafely(interaction, {
+            content: '❌ Une erreur est survenue.',
             ephemeral: true
-        });
-    }
-
-    // ========================================
-    // /pay
-    // ========================================
-
-    if (interaction.commandName === 'pay') {
-
-        await interaction.reply({
-            content: `
-💸 **PAIEMENTS**
-
-━━━━━━━━━━━━━━
-
-Les informations de paiement sont gérées par l’équipe.
-
-Si tu as une question sur un paiement, contacte un manager dans ton salon privé.
-
-━━━━━━━━━━━━━━
-            `,
-            ephemeral: true
-        });
-    }
-
-    // ========================================
-    // /reels
-    // ========================================
-
-    if (interaction.commandName === 'reels') {
-
-        await interaction.reply({
-            content: `
-🎬 **REELS**
-
-━━━━━━━━━━━━━━
-
-Poste régulièrement, garde un rythme stable et suis les consignes données dans les ressources.
-
-📚 Ressources utiles :
-➜ <#1485480560741847212>
-➜ <#1485480522023964772>
-
-━━━━━━━━━━━━━━
-            `,
-            ephemeral: true
-        });
-    }
-
-    // ========================================
-    // /threads
-    // ========================================
-
-    if (interaction.commandName === 'threads') {
-
-        await interaction.reply({
-            content: `
-🧵 **THREADS**
-
-━━━━━━━━━━━━━━
-
-Créer un compte Threads peut aider ton compte Instagram à obtenir plus de visibilité.
-
-Utilise-le naturellement et évite les actions trop répétitives.
-
-━━━━━━━━━━━━━━
-            `,
-            ephemeral: true
-        });
-    }
-
-    // ========================================
-    // /views
-    // ========================================
-
-    if (interaction.commandName === 'views') {
-
-        await interaction.reply({
-            content: `
-📈 **VUES**
-
-━━━━━━━━━━━━━━
-
-Pour augmenter tes vues :
-• poste régulièrement ;
-• fais ton warm-up ;
-• teste plusieurs formats ;
-• garde les meilleurs hooks.
-
-━━━━━━━━━━━━━━
-            `,
-            ephemeral: true
-        });
-    }
-
-    // ========================================
-    // /shadowban
-    // ========================================
-
-    if (interaction.commandName === 'shadowban') {
-
-        await interaction.reply({
-            content: `
-⚠️ **SHADOWBAN**
-
-━━━━━━━━━━━━━━
-
-Si tes vues chutent fortement :
-• ralentis les actions répétitives ;
-• évite le spam ;
-• fais un warm-up propre ;
-• demande à un manager de vérifier ton compte.
-
-━━━━━━━━━━━━━━
-            `,
-            ephemeral: true
-        });
-    }
-
-    // ========================================
-    // /help
-    // ========================================
-
-    if (interaction.commandName === 'help') {
-
-        await interaction.reply({
-            content: `
-📚 **COMMANDES DISPONIBLES**
-
-━━━━━━━━━━━━━━
-
-➜ /start
-➜ /warmup
-➜ /pay
-➜ /reels
-➜ /threads
-➜ /views
-➜ /shadowban
-➜ /help
-
-━━━━━━━━━━━━━━
-            `,
-            ephemeral: true
-        });
+        }).catch(() => null);
     }
 });
 
-// ========================================
-// DETECTION LIENS INSTAGRAM
-// ========================================
-
 client.on('messageCreate', async message => {
+    if (message.author.bot || !message.guild) return;
 
     try {
+        const vaActiveCategory = await getVaActiveCategory(message.guild);
 
-        if (message.author.bot) return;
+        if (!isVaActiveWorkflowChannel(message, vaActiveCategory.id)) return;
 
-        // Vérifie salon privé utilisateur
-        if (message.channel.topic !== message.author.id) return;
+        const instagramProfile = extractInstagramProfile(message.content);
 
-        const instagramUsername = extractInstagramUsername(message.content);
+        if (!instagramProfile) return;
 
-        if (!instagramUsername) return;
-
-        // Verrou par message: évite qu'un même événement Discord déclenche deux workflows.
         if (processedInstagramMessages.has(message.id)) {
-            console.log(`[Instagram] Message déjà traité, ignoré: ${message.id}`);
+            console.log(`[Workflow] Message Instagram déjà traité: ${message.id}`);
             return;
         }
 
         processedInstagramMessages.add(message.id);
         setTimeout(() => processedInstagramMessages.delete(message.id), 10 * 60 * 1000);
 
-        const workflowKey = `${message.guild.id}:${message.author.id}`;
-
-        // Verrou par utilisateur: évite deux transitions/réponses si deux liens arrivent en même temps.
-        if (instagramValidationsInProgress.has(workflowKey)) {
-            console.log(`[Instagram] Workflow déjà en cours dans ${message.channel.id}, message ignoré: ${message.id}`);
-            return;
-        }
-
         console.log('====================');
-        console.log(`[Instagram] Lien détecté: @${instagramUsername}`);
-        console.log(`[Instagram] URL nettoyée: ${buildInstagramProfileUrl(instagramUsername)}`);
-        console.log(`[Instagram] Message: ${message.id}`);
-        console.log(`[Instagram] Salon: ${message.channel.id}`);
-        console.log(`[Instagram] Auteur: ${message.author.id}`);
+        console.log(`[Workflow] Lien Instagram détecté: @${instagramProfile.username}`);
+        console.log(`[Workflow] URL normalisée: ${instagramProfile.url}`);
+        console.log(`[Workflow] Message: ${message.id}`);
+        console.log(`[Workflow] Salon: ${message.channel.id}`);
+        console.log(`[Workflow] Auteur: ${message.author.id}`);
         console.log('====================');
 
-        instagramValidationsInProgress.add(workflowKey);
-
-        try {
-            const workflowChannel = await createInstagramWorkflowChannel(message, instagramUsername);
-            await validateInstagramAccount(workflowChannel, instagramUsername, message.author.username);
-        } finally {
-            instagramValidationsInProgress.delete(workflowKey);
-        }
-
+        await moveUserToVaOp(message, instagramProfile);
     } catch (error) {
-
-        console.log('❌ ERREUR GLOBALE');
-        console.log(error);
+        console.log('❌ Erreur workflow message');
+        console.log(error?.message || error);
     }
 });
 
