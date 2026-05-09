@@ -17,7 +17,8 @@ const {
     GatewayIntentBits,
     PermissionsBitField,
     ChannelType,
-    EmbedBuilder
+    EmbedBuilder,
+    SlashCommandBuilder
 } = require('discord.js');
 
 const client = new Client({
@@ -110,140 +111,11 @@ function extractMetaContent(html, property) {
     return '';
 }
 
-function extractJsonLd(html) {
-    const match = html.match(/<script type=["']application\/ld\+json["']>(.*?)<\/script>/is);
-
-    if (!match) return null;
-
-    try {
-        return JSON.parse(decodeHtmlEntities(match[1]));
-    } catch (error) {
-        console.log('[Instagram] JSON-LD illisible.');
-        return null;
-    }
-}
-
-function extractJsonStringValue(html, key) {
-    const pattern = new RegExp(`"${key}"\\s*:\\s*"((?:\\\\.|[^"\\\\])*)"`, 'i');
-    const match = html.match(pattern) || normalizeInstagramHtml(html).match(pattern);
-
-    if (!match) return '';
-
-    try {
-        return JSON.parse(`"${match[1]}"`);
-    } catch (error) {
-        return normalizeInstagramHtml(match[1]);
-    }
-}
-
-function parseJsonBlock(rawJson) {
-    try {
-        const cleanJson = decodeHtmlEntities(rawJson)
-            .replace(/^<!--/, '')
-            .replace(/-->$/, '')
-            .trim();
-
-        return JSON.parse(cleanJson);
-    } catch (error) {
-        return null;
-    }
-}
-
-function extractPublicJsonBlocks(html) {
-    const blocks = [];
-    const scriptPattern = /<script\b[^>]*type=["']application\/json["'][^>]*>(.*?)<\/script>/gis;
-    const nextDataPattern = /<script\b[^>]*id=["']__NEXT_DATA__["'][^>]*>(.*?)<\/script>/is;
-    let match;
-
-    while ((match = scriptPattern.exec(html)) !== null) {
-        const parsed = parseJsonBlock(match[1]);
-        if (parsed) blocks.push(parsed);
-    }
-
-    const nextDataMatch = html.match(nextDataPattern);
-    if (nextDataMatch) {
-        const parsed = parseJsonBlock(nextDataMatch[1]);
-        if (parsed) blocks.push(parsed);
-    }
-
-    const jsonLd = extractJsonLd(html);
-    if (jsonLd) blocks.push(jsonLd);
-
-    return blocks;
-}
-
 function isDefaultInstagramProfilePicture(value) {
     const text = String(value || '');
     return !text ||
         text.includes('44884218_345707102882519_2446069589734326272_n.jpg') ||
         text.includes('anonymousUser.jpg');
-}
-
-function rememberBiography(signals, value) {
-    const biography = stripHtml(String(value || ''));
-    if (biography && !signals.biography && !/^see instagram photos and videos/i.test(biography)) {
-        signals.biography = biography;
-    }
-}
-
-function collectInstagramSignals(value, username, signals, parentKey = '', depth = 0) {
-    if (!value || depth > 18) return;
-
-    if (Array.isArray(value)) {
-        if (/edge_owner_to_timeline_media|timeline|media|post/i.test(parentKey) && value.length > 0) {
-            signals.postCount = Math.max(signals.postCount, value.length);
-        }
-
-        for (const item of value) {
-            collectInstagramSignals(item, username, signals, parentKey, depth + 1);
-        }
-
-        return;
-    }
-
-    if (typeof value !== 'object') return;
-
-    for (const [key, childValue] of Object.entries(value)) {
-        const lowerKey = key.toLowerCase();
-        const nextParentKey = parentKey ? `${parentKey}.${lowerKey}` : lowerKey;
-
-        if (['username', 'user_name', 'login'].includes(lowerKey) && String(childValue).toLowerCase() === username) {
-            signals.usernameFound = true;
-        }
-
-        if (['biography', 'bio', 'biography_text'].includes(lowerKey) && typeof childValue === 'string') {
-            rememberBiography(signals, childValue);
-        }
-
-        if (lowerKey === 'raw_text' && /biography|bio/.test(parentKey) && typeof childValue === 'string') {
-            rememberBiography(signals, childValue);
-        }
-
-        if ([
-            'profile_pic_url',
-            'profile_pic_url_hd',
-            'profile_picture',
-            'profilepicture',
-            'avatar',
-            'image'
-        ].includes(lowerKey) && !isDefaultInstagramProfilePicture(childValue)) {
-            signals.profilePicture = String(childValue);
-        }
-
-        if (['media_count', 'posts_count', 'post_count'].includes(lowerKey) && Number.isFinite(Number(childValue))) {
-            signals.postCount = Math.max(signals.postCount, Number(childValue));
-        }
-
-        if (lowerKey === 'count' && /edge_owner_to_timeline_media|timeline_media|posts|media/.test(parentKey) && Number.isFinite(Number(childValue))) {
-            signals.postCount = Math.max(signals.postCount, Number(childValue));
-        }
-
-        if (lowerKey === 'edges' && /edge_owner_to_timeline_media|timeline_media|posts|media/.test(parentKey) && Array.isArray(childValue)) {
-            signals.postCount = Math.max(signals.postCount, childValue.length);
-        }
-
-        collectInstagramSignals(childValue, username, signals, nextParentKey, depth + 1);
-    }
 }
 
 function parsePublicInstagramPage(html, username, status) {
@@ -253,38 +125,16 @@ function parsePublicInstagramPage(html, username, status) {
     const ogTitle = extractMetaContent(html, 'og:title');
     const lowerUsername = username.toLowerCase();
     const searchableHtml = normalizeInstagramHtml(html);
-    const signals = {
-        usernameFound: false,
-        biography: '',
-        profilePicture: '',
-        postCount: 0
-    };
-
-    for (const jsonBlock of extractPublicJsonBlocks(html)) {
-        collectInstagramSignals(jsonBlock, lowerUsername, signals);
-    }
-
-    const rawBiography = signals.biography ||
-        extractJsonStringValue(html, 'biography') ||
-        extractJsonStringValue(html, 'bio') ||
-        searchableHtml.match(/"biography_with_entities"\s*:\s*\{[^}]*"raw_text"\s*:\s*"((?:\\.|[^"\\])*)"/i)?.[1] ||
-        ogDescription.match(/(?:on Instagram|sur Instagram)\s*:\s*["“](.+?)["”]\s*$/i)?.[1] ||
-        '';
-    const rawProfilePicture = signals.profilePicture ||
-        extractJsonStringValue(html, 'profile_pic_url_hd') ||
-        extractJsonStringValue(html, 'profile_pic_url') ||
-        extractJsonStringValue(html, 'profile_picture') ||
-        ogImage ||
-        '';
+    const rawBiography = ogDescription || searchableHtml.match(/(?:biography|description)"?\s*:\s*"([^"]+)"/i)?.[1] || '';
+    const rawProfilePicture = ogImage || searchableHtml.match(/https?:\/\/[^"']+(?:profile|scontent|cdninstagram)[^"']+/i)?.[0] || '';
     const mediaCountMatch = searchableHtml.match(/"edge_owner_to_timeline_media"\s*:\s*\{\s*"count"\s*:\s*(\d+)/) ||
         searchableHtml.match(/"media_count"\s*:\s*(\d+)/) ||
+        searchableHtml.match(/"post_count"\s*:\s*(\d+)/) ||
         searchableHtml.match(/"posts_count"\s*:\s*(\d+)/) ||
         ogDescription.match(/([\d,.]+)\s+(?:posts?|publications?)/i);
     const biography = stripHtml(rawBiography);
     const hasBioSignal = Boolean(biography.trim()) ||
-        /"biography"\s*:\s*"(?!")/i.test(searchableHtml) ||
-        /"bio"\s*:\s*"(?!")/i.test(searchableHtml) ||
-        /"biography_with_entities"\s*:\s*\{[^}]*"raw_text"\s*:\s*"(?!")/i.test(searchableHtml);
+        /(?:biography|description)"?\s*:\s*"(?!")/i.test(searchableHtml);
     const hasPhotoSignal = Boolean(rawProfilePicture) ||
         /"profile_pic_url(?:_hd)?"\s*:\s*"https?:\/\//i.test(searchableHtml) ||
         /"profile_picture"\s*:\s*"https?:\/\//i.test(searchableHtml) ||
@@ -294,14 +144,12 @@ function parsePublicInstagramPage(html, username, status) {
         /"display_url"\s*:\s*"[^"]+"/i.test(searchableHtml);
     const fallbackPostCount = mediaCountMatch ? Number(String(mediaCountMatch[1]).replace(/[,.]/g, '')) : 0;
     const postCount = Math.max(
-        signals.postCount,
         Number.isFinite(fallbackPostCount) ? fallbackPostCount : 0,
         hasVisiblePostMarker ? 1 : 0
     );
     const profileExists = status === 200 &&
         !/Sorry, this page isn't available|Page Not Found|Cette page n’est malheureusement pas disponible/i.test(html) &&
         (
-            signals.usernameFound ||
             canonicalUrl.toLowerCase().includes(`/${lowerUsername}/`) ||
             ogTitle.toLowerCase().includes(`@${lowerUsername}`) ||
             searchableHtml.toLowerCase().includes(`"username":"${lowerUsername}"`) ||
@@ -313,7 +161,7 @@ function parsePublicInstagramPage(html, username, status) {
         /this account is private|ce compte est privé/i.test(searchableHtml);
     const hasProfilePicture = profileExists && hasPhotoSignal && !isDefaultInstagramProfilePicture(rawProfilePicture);
 
-    console.log(`[Instagram] Signaux: profil=${profileExists} privé=${isPrivate} username=${signals.usernameFound} bio=${hasBioSignal} photo=${hasProfilePicture} posts=${postCount}`);
+    console.log(`[Instagram] Signaux HTML: profil=${profileExists} privé=${isPrivate} bio=${hasBioSignal} photo=${hasProfilePicture} posts=${postCount}`);
 
     return {
         username,
@@ -378,10 +226,6 @@ function validateInstagramProfile(profile) {
     return {
         isValid
     };
-}
-
-function formatValidationDetails(missingItems) {
-    return missingItems.map(item => `- ${item}`).join('\n');
 }
 
 function getVaChannelName(discordUsername, isValidated = false) {
@@ -749,9 +593,51 @@ async function updateAllDashboards() {
     }
 }
 
+function getSlashCommands() {
+    return [
+        new SlashCommandBuilder()
+            .setName('start')
+            .setDescription('Commencer l’onboarding'),
+        new SlashCommandBuilder()
+            .setName('warmup')
+            .setDescription('Explication du warm-up Instagram'),
+        new SlashCommandBuilder()
+            .setName('pay')
+            .setDescription('Informations sur les paiements'),
+        new SlashCommandBuilder()
+            .setName('reels')
+            .setDescription('Conseils pour poster des reels'),
+        new SlashCommandBuilder()
+            .setName('threads')
+            .setDescription('Conseils et aide Threads'),
+        new SlashCommandBuilder()
+            .setName('views')
+            .setDescription('Conseils pour augmenter les vues'),
+        new SlashCommandBuilder()
+            .setName('shadowban')
+            .setDescription('Informations sur le shadowban'),
+        new SlashCommandBuilder()
+            .setName('help')
+            .setDescription('Afficher toutes les commandes')
+    ].map(command => command.toJSON());
+}
+
+async function registerSlashCommands() {
+    const commands = getSlashCommands();
+
+    for (const guild of client.guilds.cache.values()) {
+        await guild.commands.set(commands);
+        console.log(`[Discord] Commandes slash enregistrées pour ${guild.name}.`);
+    }
+}
+
 client.once('ready', async () => {
     console.log(`🔥 Bot connecté : ${client.user.tag}`);
 
+    await registerSlashCommands().catch(error => {
+        console.log('[Discord] Impossible d’enregistrer les commandes slash.');
+        console.log(error?.message || error);
+    });
     await updateAllDashboards();
     setInterval(updateAllDashboards, DASHBOARD_UPDATE_INTERVAL_MS);
 });
@@ -902,6 +788,122 @@ le bot vérifiera automatiquement ton compte Instagram.
     }
 
     // ========================================
+    // /pay
+    // ========================================
+
+    if (interaction.commandName === 'pay') {
+
+        await interaction.reply({
+            content: `
+💸 **PAIEMENTS**
+
+━━━━━━━━━━━━━━
+
+Les informations de paiement sont gérées par l’équipe.
+
+Si tu as une question sur un paiement, contacte un manager dans ton salon privé.
+
+━━━━━━━━━━━━━━
+            `,
+            ephemeral: true
+        });
+    }
+
+    // ========================================
+    // /reels
+    // ========================================
+
+    if (interaction.commandName === 'reels') {
+
+        await interaction.reply({
+            content: `
+🎬 **REELS**
+
+━━━━━━━━━━━━━━
+
+Poste régulièrement, garde un rythme stable et suis les consignes données dans les ressources.
+
+📚 Ressources utiles :
+➜ <#1485480560741847212>
+➜ <#1485480522023964772>
+
+━━━━━━━━━━━━━━
+            `,
+            ephemeral: true
+        });
+    }
+
+    // ========================================
+    // /threads
+    // ========================================
+
+    if (interaction.commandName === 'threads') {
+
+        await interaction.reply({
+            content: `
+🧵 **THREADS**
+
+━━━━━━━━━━━━━━
+
+Créer un compte Threads peut aider ton compte Instagram à obtenir plus de visibilité.
+
+Utilise-le naturellement et évite les actions trop répétitives.
+
+━━━━━━━━━━━━━━
+            `,
+            ephemeral: true
+        });
+    }
+
+    // ========================================
+    // /views
+    // ========================================
+
+    if (interaction.commandName === 'views') {
+
+        await interaction.reply({
+            content: `
+📈 **VUES**
+
+━━━━━━━━━━━━━━
+
+Pour augmenter tes vues :
+• poste régulièrement ;
+• fais ton warm-up ;
+• teste plusieurs formats ;
+• garde les meilleurs hooks.
+
+━━━━━━━━━━━━━━
+            `,
+            ephemeral: true
+        });
+    }
+
+    // ========================================
+    // /shadowban
+    // ========================================
+
+    if (interaction.commandName === 'shadowban') {
+
+        await interaction.reply({
+            content: `
+⚠️ **SHADOWBAN**
+
+━━━━━━━━━━━━━━
+
+Si tes vues chutent fortement :
+• ralentis les actions répétitives ;
+• évite le spam ;
+• fais un warm-up propre ;
+• demande à un manager de vérifier ton compte.
+
+━━━━━━━━━━━━━━
+            `,
+            ephemeral: true
+        });
+    }
+
+    // ========================================
     // /help
     // ========================================
 
@@ -915,6 +917,12 @@ le bot vérifiera automatiquement ton compte Instagram.
 
 ➜ /start
 ➜ /warmup
+➜ /pay
+➜ /reels
+➜ /threads
+➜ /views
+➜ /shadowban
+➜ /help
 
 ━━━━━━━━━━━━━━
             `,
