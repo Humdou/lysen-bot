@@ -255,8 +255,11 @@ async function fetchPublicInstagramProfile(username) {
 function validateInstagramProfile(profile) {
     const isValid = profile.profileExists &&
         !profile.isPrivate &&
-        profile.postCount >= 1 &&
-        (profile.hasBio || profile.hasProfilePicture);
+        profile.postCount >= 1;
+
+    if (isValid && !profile.hasBio && !profile.hasProfilePicture) {
+        console.log('[Instagram] Bio/photo non visibles dans le HTML reçu, validation basée sur profil public + posts détectés.');
+    }
 
     return {
         isValid
