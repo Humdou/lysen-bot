@@ -421,15 +421,15 @@ function formatValidationDetails(missingItems) {
     return missingItems.map(item => `• ${item.details}`).join('\n');
 }
 
-function getValidatedChannelName(username) {
-    const safeUsername = username
+function getValidatedChannelName(discordUsername) {
+    const safeUsername = discordUsername
         .toLowerCase()
         .replace(/[^a-z0-9_-]/g, '-')
         .replace(/-+/g, '-')
         .replace(/^-|-$/g, '')
         .slice(0, 80);
 
-    return `cpt-${safeUsername || 'instagram'}-✅`;
+    return `cpt-${safeUsername || 'va'}-✅`;
 }
 
 function getInstagramFetchErrorMessage(reason, username) {
@@ -472,7 +472,7 @@ Corrige le compte, puis renvoie le lien Instagram ici pour une nouvelle vérific
         return;
     }
 
-    const updatedChannel = await message.channel.setName(getValidatedChannelName(username));
+    const updatedChannel = await message.channel.setName(getValidatedChannelName(message.author.username));
 
     await message.channel.send(`
 ✅ **Compte Instagram valide**
