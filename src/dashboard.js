@@ -7,6 +7,7 @@ const {
 } = require('./discord-utils');
 
 const DASHBOARD_TITLE = '📊 OFM Management Dashboard';
+const SECTION_DIVIDER = '━━━━━━━━━━━━━━━━━━━━';
 
 function formatNumber(value) {
     return new Intl.NumberFormat('fr-FR').format(value || 0);
@@ -33,6 +34,18 @@ function formatMemoryUsage() {
 
 function formatDiscordTimestamp(date) {
     return `<t:${Math.floor(date.getTime() / 1000)}:R>`;
+}
+
+function metric(label, value) {
+    return `**${label}**\n\`${value}\``;
+}
+
+function metricLine(icon, label, value) {
+    return `${icon}  ${label}\n> **${value}**`;
+}
+
+function pair(left, right) {
+    return `${left}\n\n${right}`;
 }
 
 function countTextChannels(channels, categoryId) {
@@ -144,53 +157,104 @@ async function collectDashboardStats(guild, client, metricsStore) {
 
 function buildDashboardEmbed(guild, stats, refreshedAt = new Date()) {
     return new EmbedBuilder()
-        .setColor(0x2ECC71)
+        .setColor(0x27AE60)
         .setTitle(DASHBOARD_TITLE)
-        .setDescription('Pilotage OFM: onboarding, progression VA, activité Discord et santé du bot.')
+        .setDescription([
+            '**Pilotage central de l’agence OFM**',
+            'Suivi onboarding, progression VA, activité Discord et santé opérationnelle.',
+            '',
+            SECTION_DIVIDER
+        ].join('\n'))
         .addFields(
             {
-                name: '📌 Général',
+                name: '📌 Vue Générale',
                 value: [
-                    `👥 Membres Discord: **${formatNumber(stats.general.totalDiscordMembers)}**`,
-                    `😎 VA ACTIF: **${formatNumber(stats.general.totalVaActive)}**`,
-                    `🫡 VA OP: **${formatNumber(stats.general.totalVaOp)}**`,
-                    `🏗️ Salons créés: **${formatNumber(stats.general.totalWorkflowChannelsCreated)}**`,
-                    `🔓 Salons actifs: **${formatNumber(stats.general.totalActiveChannels)}**`,
-                    `✅ Onboardings complétés: **${formatNumber(stats.general.completedOnboarding)}**`
+                    pair(
+                        metricLine('👥', 'Membres Discord', formatNumber(stats.general.totalDiscordMembers)),
+                        metricLine('✅', 'Onboardings complétés', formatNumber(stats.general.completedOnboarding))
+                    ),
+                    '',
+                    SECTION_DIVIDER
                 ].join('\n'),
                 inline: false
+            },
+            {
+                name: '👥 Progression VA',
+                value: [
+                    metric('😎 VA ACTIF', formatNumber(stats.general.totalVaActive)),
+                    '',
+                    metric('🫡 VA OP', formatNumber(stats.general.totalVaOp))
+                ].join('\n'),
+                inline: true
+            },
+            {
+                name: '🏗️ Salons Workflow',
+                value: [
+                    metric('🏗️ Créés', formatNumber(stats.general.totalWorkflowChannelsCreated)),
+                    '',
+                    metric('🔓 Actifs', formatNumber(stats.general.totalActiveChannels))
+                ].join('\n'),
+                inline: true
+            },
+            {
+                name: '\u200B',
+                value: [
+                    metric('📍 Refresh', formatDiscordTimestamp(refreshedAt)),
+                    '',
+                    metric('📡 Ping', `${Math.round(stats.bot.latency)} ms`)
+                ].join('\n'),
+                inline: true
             },
             {
                 name: '📸 Workflow Instagram',
                 value: [
-                    `😎 En VA ACTIF: **${formatNumber(stats.workflow.vaActiveChannelCount)}**`,
-                    `🫡 En VA OP: **${formatNumber(stats.workflow.vaOpChannelCount)}**`,
-                    `📨 Comptes envoyés aujourd’hui: **${formatNumber(stats.workflow.instagramSubmissionsToday)}**`,
-                    `🚀 Onboardings lancés aujourd’hui: **${formatNumber(stats.workflow.onboardingStartsToday)}**`
+                    SECTION_DIVIDER,
+                    '',
+                    pair(
+                        metricLine('😎', 'Salons actuellement en VA ACTIF', formatNumber(stats.workflow.vaActiveChannelCount)),
+                        metricLine('🫡', 'Salons actuellement en VA OP', formatNumber(stats.workflow.vaOpChannelCount))
+                    ),
+                    '',
+                    pair(
+                        metricLine('📨', 'Comptes envoyés aujourd’hui', formatNumber(stats.workflow.instagramSubmissionsToday)),
+                        metricLine('🚀', 'Onboardings lancés aujourd’hui', formatNumber(stats.workflow.onboardingStartsToday))
+                    )
                 ].join('\n'),
                 inline: false
             },
             {
-                name: '🧵 Commandes / Activité',
+                name: '🧵 Commandes & Activité',
                 value: [
-                    `🚀 Utilisateurs /start: **${formatNumber(stats.commands.startUsersTotal)}** total / **${formatNumber(stats.commands.startUsersToday)}** aujourd’hui`,
-                    `🔥 Utilisateurs /warmup: **${formatNumber(stats.commands.warmupUsersTotal)}** total / **${formatNumber(stats.commands.warmupUsersToday)}** aujourd’hui`,
-                    `⚡ Utilisateurs de commandes aujourd’hui: **${formatNumber(stats.commands.commandUsersToday)}**`
+                    SECTION_DIVIDER,
+                    '',
+                    pair(
+                        metricLine('🚀', '/start', `${formatNumber(stats.commands.startUsersTotal)} total • ${formatNumber(stats.commands.startUsersToday)} aujourd’hui`),
+                        metricLine('🔥', '/warmup', `${formatNumber(stats.commands.warmupUsersTotal)} total • ${formatNumber(stats.commands.warmupUsersToday)} aujourd’hui`)
+                    ),
+                    '',
+                    metricLine('⚡', 'Utilisateurs de commandes aujourd’hui', formatNumber(stats.commands.commandUsersToday))
                 ].join('\n'),
                 inline: false
             },
             {
-                name: '🤖 Santé Bot',
+                name: '🤖 Santé du Bot',
                 value: [
-                    `⏱️ Uptime: **${stats.bot.uptime}**`,
-                    `🔄 Dernier refresh: **${formatDiscordTimestamp(refreshedAt)}**`,
-                    `🧠 Mémoire: **${stats.bot.memoryUsage}**`,
-                    `📡 Ping: **${Math.round(stats.bot.latency)} ms**`
+                    SECTION_DIVIDER,
+                    '',
+                    pair(
+                        metricLine('⏱️', 'Uptime', stats.bot.uptime),
+                        metricLine('🧠', 'Mémoire', stats.bot.memoryUsage)
+                    ),
+                    '',
+                    pair(
+                        metricLine('📡', 'Latence Discord', `${Math.round(stats.bot.latency)} ms`),
+                        metricLine('🔄', 'Dernier refresh dashboard', formatDiscordTimestamp(refreshedAt))
+                    )
                 ].join('\n'),
                 inline: false
             }
         )
-        .setFooter({ text: `${guild.name} • refresh auto toutes les 30 minutes` })
+        .setFooter({ text: `${guild.name} • Dashboard OFM • refresh automatique toutes les 30 minutes` })
         .setTimestamp(refreshedAt);
 }
 
