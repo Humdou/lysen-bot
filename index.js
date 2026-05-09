@@ -111,6 +111,10 @@ function extractMetaContent(html, property) {
     return '';
 }
 
+function hasMetaTag(html, property) {
+    return Boolean(extractMetaContent(html, property));
+}
+
 function isDefaultInstagramProfilePicture(value) {
     const text = String(value || '');
     return !text ||
@@ -120,24 +124,36 @@ function isDefaultInstagramProfilePicture(value) {
 
 function parsePublicInstagramPage(html, username, status) {
     const ogDescription = extractMetaContent(html, 'og:description');
+    const metaDescription = extractMetaContent(html, 'description');
     const ogImage = extractMetaContent(html, 'og:image');
     const canonicalUrl = extractMetaContent(html, 'og:url');
     const ogTitle = extractMetaContent(html, 'og:title');
     const lowerUsername = username.toLowerCase();
     const searchableHtml = normalizeInstagramHtml(html);
-    const rawBiography = ogDescription || searchableHtml.match(/(?:biography|description)"?\s*:\s*"([^"]+)"/i)?.[1] || '';
-    const rawProfilePicture = ogImage || searchableHtml.match(/https?:\/\/[^"']+(?:profile|scontent|cdninstagram)[^"']+/i)?.[0] || '';
+    const rawBiography = ogDescription ||
+        metaDescription ||
+        searchableHtml.match(/(?:biography|description)"?\s*:\s*"([^"]+)"/i)?.[1] ||
+        '';
+    const rawProfilePicture = ogImage ||
+        searchableHtml.match(/"profile_pic_url(?:_hd)?"\s*:\s*"(https?:\/\/[^"]+)"/i)?.[1] ||
+        searchableHtml.match(/"profile_picture"\s*:\s*"(https?:\/\/[^"]+)"/i)?.[1] ||
+        searchableHtml.match(/https?:\/\/[^"']+(?:profile|scontent|cdninstagram)[^"']+/i)?.[0] ||
+        '';
     const mediaCountMatch = searchableHtml.match(/"edge_owner_to_timeline_media"\s*:\s*\{\s*"count"\s*:\s*(\d+)/) ||
         searchableHtml.match(/"media_count"\s*:\s*(\d+)/) ||
         searchableHtml.match(/"post_count"\s*:\s*(\d+)/) ||
         searchableHtml.match(/"posts_count"\s*:\s*(\d+)/) ||
         ogDescription.match(/([\d,.]+)\s+(?:posts?|publications?)/i);
     const biography = stripHtml(rawBiography);
-    const hasBioSignal = Boolean(biography.trim()) ||
+    const hasBioSignal = hasMetaTag(html, 'og:description') ||
+        hasMetaTag(html, 'description') ||
+        Boolean(biography.trim()) ||
         /(?:biography|description)"?\s*:\s*"(?!")/i.test(searchableHtml);
-    const hasPhotoSignal = Boolean(rawProfilePicture) ||
+    const hasPhotoSignal = hasMetaTag(html, 'og:image') ||
+        Boolean(rawProfilePicture) ||
         /"profile_pic_url(?:_hd)?"\s*:\s*"https?:\/\//i.test(searchableHtml) ||
         /"profile_picture"\s*:\s*"https?:\/\//i.test(searchableHtml) ||
+        /https?:\/\/[^"']+(?:scontent|cdninstagram)[^"']+/i.test(searchableHtml) ||
         /<meta[^>]+property=["']og:image["'][^>]+content=["']https?:\/\/[^"']+["']/i.test(html);
     const hasVisiblePostMarker = /<meta[^>]+property=["']og:image["'][^>]+content=["'][^"']+instagram[^"']+["']/i.test(html) ||
         /"shortcode"\s*:\s*"[^"]+"/i.test(searchableHtml) ||
@@ -159,9 +175,14 @@ function parsePublicInstagramPage(html, username, status) {
     const isPrivate = /"is_private"\s*:\s*true/i.test(searchableHtml) ||
         /"isPrivate"\s*:\s*true/i.test(searchableHtml) ||
         /this account is private|ce compte est privé/i.test(searchableHtml);
+    const isPublic = profileExists && !isPrivate;
     const hasProfilePicture = profileExists && hasPhotoSignal && !isDefaultInstagramProfilePicture(rawProfilePicture);
 
-    console.log(`[Instagram] Signaux HTML: profil=${profileExists} privé=${isPrivate} bio=${hasBioSignal} photo=${hasProfilePicture} posts=${postCount}`);
+    console.log(`[Instagram] Username: ${username}`);
+    console.log(`[Instagram] Public: ${isPublic}`);
+    console.log(`[Instagram] Posts: ${postCount}`);
+    console.log(`[Instagram] Bio détectée: ${profileExists && hasBioSignal}`);
+    console.log(`[Instagram] Photo détectée: ${hasProfilePicture}`);
 
     return {
         username,
@@ -179,7 +200,7 @@ async function fetchPublicInstagramProfile(username) {
 
     console.log('====================');
     console.log(`[Instagram] Validation publique: @${username}`);
-    console.log(`[Instagram] URL: ${url}`);
+    console.log(`[Instagram] URL normalisée: ${url}`);
     console.log('====================');
 
     try {
@@ -967,6 +988,7 @@ client.on('messageCreate', async message => {
 
         console.log('====================');
         console.log(`[Instagram] Lien détecté: @${instagramUsername}`);
+        console.log(`[Instagram] URL nettoyée: ${buildInstagramProfileUrl(instagramUsername)}`);
         console.log(`[Instagram] Message: ${message.id}`);
         console.log(`[Instagram] Salon: ${message.channel.id}`);
         console.log(`[Instagram] Auteur: ${message.author.id}`);
