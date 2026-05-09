@@ -42,7 +42,7 @@ const processedInstagramMessages = new Set();
 // ========================================
 
 function extractInstagramUsername(content) {
-    const instagramUrlMatch = content.match(/https?:\/\/(?:www\.)?(?:instagram\.com|instagr\.am)\/([A-Za-z0-9._]+)/i);
+    const instagramUrlMatch = content.match(/(?:https?:\/\/)?(?:www\.)?instagram\.com\/([a-zA-Z0-9._]+)/i);
 
     if (!instagramUrlMatch) return null;
 
