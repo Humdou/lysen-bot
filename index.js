@@ -4,8 +4,10 @@ const CATEGORY_ID = '1502055567760425122';
 const COMPTE_CREE_CATEGORY_ID = '1502120982591045805';
 const DASHBOARD_CHANNEL_NAME = '📊・dashboard';
 const DASHBOARD_UPDATE_INTERVAL_MS = 12 * 60 * 60 * 1000;
-const RAPIDAPI_INSTAGRAM_HOST = process.env.RAPIDAPI_INSTAGRAM_HOST || 'instagram-scraper-api2.p.rapidapi.com';
-const RAPIDAPI_INSTAGRAM_PROFILE_URL = `https://${RAPIDAPI_INSTAGRAM_HOST}/v1/info`;
+const RAPIDAPI_INSTAGRAM = {
+    host: 'instagram-scraper-api2.p.rapidapi.com',
+    profileUrl: 'https://instagram-scraper-api2.p.rapidapi.com/v1/info'
+};
 const REQUIRED_HIGHLIGHTS_COUNT = 2;
 const INSTAGRAM_TEMPORARY_ERROR_MESSAGE = `❌ Vérification Instagram temporairement indisponible.
 Réessaie plus tard.`;
@@ -176,16 +178,16 @@ async function fetchInstagramProfileWithRapidApi(username) {
     }
 
     try {
-        const url = new URL(RAPIDAPI_INSTAGRAM_PROFILE_URL);
+        const url = new URL(RAPIDAPI_INSTAGRAM.profileUrl);
         url.searchParams.set('username', username);
 
-        console.log(`[RapidAPI] Host: ${RAPIDAPI_INSTAGRAM_HOST}`);
+        console.log(`[RapidAPI] Host: ${RAPIDAPI_INSTAGRAM.host}`);
         console.log(`[RapidAPI] Requête: ${url.toString()}`);
 
         const response = await fetchWithTimeout(url, {
             headers: {
                 'x-rapidapi-key': process.env.RAPIDAPI_KEY,
-                'x-rapidapi-host': RAPIDAPI_INSTAGRAM_HOST
+                'x-rapidapi-host': RAPIDAPI_INSTAGRAM.host
             }
         });
         const contentType = response.headers.get('content-type') || 'unknown';
