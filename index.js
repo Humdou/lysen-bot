@@ -5,8 +5,8 @@ const COMPTE_CREE_CATEGORY_ID = '1502120982591045805';
 const DASHBOARD_CHANNEL_NAME = '📊・dashboard';
 const DASHBOARD_UPDATE_INTERVAL_MS = 12 * 60 * 60 * 1000;
 const RAPIDAPI_INSTAGRAM = {
-    host: 'instagram-scraper21.p.rapidapi.com',
-    profileUrl: 'https://instagram-scraper21.p.rapidapi.com/v1/info'
+    host: 'instagram120.p.rapidapi.com',
+    postsUrl: 'https://instagram120.p.rapidapi.com/api/instagram/posts'
 };
 const REQUIRED_HIGHLIGHTS_COUNT = 2;
 const INSTAGRAM_TEMPORARY_ERROR_MESSAGE = `❌ Vérification Instagram temporairement indisponible.
@@ -109,10 +109,26 @@ function findFirstValue(object, keys) {
 }
 
 function getRapidApiProfilePayload(data) {
+    const firstPost = Array.isArray(data?.result)
+        ? data.result[0]
+        : Array.isArray(data?.data)
+            ? data.data[0]
+            : Array.isArray(data?.posts)
+                ? data.posts[0]
+                : null;
+
     return data?.data?.user ||
         data?.data ||
         data?.user ||
         data?.result?.user ||
+        data?.owner ||
+        data?.profile ||
+        data?.author ||
+        data?.items?.[0]?.user ||
+        data?.items?.[0]?.owner ||
+        firstPost?.user ||
+        firstPost?.owner ||
+        firstPost?.author ||
         data?.result ||
         data;
 }
@@ -170,13 +186,28 @@ function normalizeRapidApiProfile(data) {
     };
 }
 
+function hasRapidApiProfileData(profile, data) {
+    const payload = getRapidApiProfilePayload(data);
+    const hasPosts = Array.isArray(data?.result) && data.result.length > 0 ||
+        Array.isArray(data?.data) && data.data.length > 0 ||
+        Array.isArray(data?.posts) && data.posts.length > 0 ||
+        Array.isArray(data?.items) && data.items.length > 0;
+
+    return Boolean(payload && typeof payload === 'object') &&
+        (Boolean(profile.biography.trim()) || profile.hasProfilePicture || hasPosts);
+}
+
 async function fetchInstagramProfileWithRapidApi(username) {
-    const url = new URL(RAPIDAPI_INSTAGRAM.profileUrl);
-    url.searchParams.set('username', username);
+    const url = new URL(RAPIDAPI_INSTAGRAM.postsUrl);
+    const requestBody = JSON.stringify({
+        username,
+        maxId: ''
+    });
 
     console.log('====================');
     console.log(`[RapidAPI] Analyse du profil Instagram @${username}`);
     console.log(`[RapidAPI] Endpoint préparé: ${url.toString()}`);
+    console.log(`[RapidAPI] Body envoyé: ${requestBody}`);
     console.log('====================');
 
     if (!process.env.RAPIDAPI_KEY) {
@@ -197,10 +228,13 @@ async function fetchInstagramProfileWithRapidApi(username) {
         console.log(`[RapidAPI] Requête: ${url.toString()}`);
 
         const response = await fetchWithTimeout(url, {
+            method: 'POST',
             headers: {
+                'Content-Type': 'application/json',
                 'x-rapidapi-key': process.env.RAPIDAPI_KEY,
                 'x-rapidapi-host': RAPIDAPI_INSTAGRAM.host
-            }
+            },
+            body: requestBody
         });
         const contentType = response.headers.get('content-type') || 'unknown';
         const body = await response.text();
@@ -284,6 +318,19 @@ async function fetchInstagramProfileWithRapidApi(username) {
         console.log(`[RapidAPI] Bio: ${Boolean(profile.biography.trim())}`);
         console.log(`[RapidAPI] Photo: ${profile.hasProfilePicture}`);
         console.log(`[RapidAPI] Highlights: ${profile.highlightsCount}`);
+
+        if (!hasRapidApiProfileData(profile, data)) {
+            console.log('[RapidAPI][FAIL] Réponse reçue, mais aucune donnée profil exploitable.');
+            return {
+                ok: false,
+                reason: 'profile_missing',
+                diagnostics: {
+                    endpoint: url.toString(),
+                    status: response.status,
+                    body
+                }
+            };
+        }
 
         return {
             ok: true,
