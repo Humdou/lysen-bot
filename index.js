@@ -5,8 +5,8 @@ const COMPTE_CREE_CATEGORY_ID = '1502120982591045805';
 const DASHBOARD_CHANNEL_NAME = '📊・dashboard';
 const DASHBOARD_UPDATE_INTERVAL_MS = 12 * 60 * 60 * 1000;
 const RAPIDAPI_INSTAGRAM = {
-    host: 'instagram-scraper-api2.p.rapidapi.com',
-    profileUrl: 'https://instagram-scraper-api2.p.rapidapi.com/v1/info'
+    host: 'instagram-scraper21.p.rapidapi.com',
+    profileUrl: 'https://instagram-scraper21.p.rapidapi.com/v1/info'
 };
 const REQUIRED_HIGHLIGHTS_COUNT = 2;
 const INSTAGRAM_TEMPORARY_ERROR_MESSAGE = `❌ Vérification Instagram temporairement indisponible.
