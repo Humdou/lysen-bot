@@ -205,16 +205,30 @@ async function fetchPublicInstagramProfile(username) {
 
     try {
         const response = await fetchWithTimeout(url, {
+            redirect: 'follow',
             headers: {
-                'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'accept-language': 'fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7',
-                'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36'
+                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+                'Accept-Language': 'fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+                'Referer': 'https://www.instagram.com/',
+                'Cache-Control': 'no-cache',
+                'Pragma': 'no-cache',
+                'Upgrade-Insecure-Requests': '1'
             }
         });
         const html = await response.text();
+        const lowerHtml = html.toLowerCase();
 
+        console.log(`[Instagram] URL finale fetch: ${response.url || url}`);
         console.log(`[Instagram] Status: ${response.status}`);
         console.log(`[Instagram] Taille HTML: ${html.length} caractères`);
+        console.log('[Instagram] Début HTML reçu (3000 premiers caractères):');
+        console.log(html.slice(0, 3000));
+        console.log(`[Instagram] Contient "login": ${lowerHtml.includes('login')}`);
+        console.log(`[Instagram] Contient "instagram.com/accounts/login": ${lowerHtml.includes('instagram.com/accounts/login')}`);
+        console.log(`[Instagram] Contient "challenge": ${lowerHtml.includes('challenge')}`);
+        console.log(`[Instagram] Contient "Please wait": ${html.includes('Please wait')}`);
+        console.log(`[Instagram] Contient "meta property": ${lowerHtml.includes('meta property')}`);
 
         if (!response.ok && response.status !== 404) {
             return {
