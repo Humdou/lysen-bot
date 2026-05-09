@@ -46,7 +46,12 @@ function extractInstagramUsername(content) {
 
     if (!instagramUrlMatch) return null;
 
-    const username = instagramUrlMatch[1].replace(/^@/, '').toLowerCase();
+    const username = instagramUrlMatch[1]
+        .split('?')[0]
+        .split('#')[0]
+        .replace(/^@/, '')
+        .replace(/\/+$/, '')
+        .toLowerCase();
     const reservedPaths = ['p', 'reel', 'reels', 'stories', 'explore', 'accounts', 'direct'];
 
     if (!username || reservedPaths.includes(username)) return null;
